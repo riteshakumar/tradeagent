@@ -27,6 +27,37 @@ def is_market_open() -> bool:
     return clock.is_open
 
 
+def _try_buy(symbol: str, sig: dict, account: dict, positions: list):
+    if risk.already_positioned(symbol, positions):
+        return
+    approved, reason = agent.evaluate_signal(symbol, sig)
+    log.info(f"{symbol}: agent={'APPROVE' if approved else 'REJECT'}  ({reason})")
+    if approved:
+        qty = risk.compute_qty(symbol, sig["price"], account)
+        order = broker.place_market_order(symbol, qty, "buy")
+        log.info(f"BUY order placed: {order}")
+
+
+def _try_sell(symbol: str, sig: dict, positions: list):
+    if not risk.already_positioned(symbol, positions):
+        return
+    approved, reason = agent.evaluate_signal(symbol, sig)
+    log.info(f"{symbol}: agent={'APPROVE' if approved else 'REJECT'}  ({reason})")
+    if approved:
+        result = broker.close_position(symbol)
+        log.info(f"Position closed: {result}")
+
+
+def _process_symbol(symbol: str, account: dict, positions: list):
+    bars = broker.get_bars(symbol, timeframe=config.BAR_TIMEFRAME)
+    sig  = strategy.compute_signals(bars)
+    log.info(f"{symbol}: signal={sig['signal']}  score={sig['score']}  reason={sig['reason']}")
+    if sig["signal"] == "buy":
+        _try_buy(symbol, sig, account, positions)
+    elif sig["signal"] == "sell":
+        _try_sell(symbol, sig, positions)
+
+
 def run_once():
     log.info("=== Tick start ===")
 
@@ -37,7 +68,6 @@ def run_once():
     account = broker.get_account()
     log.info(f"Account: equity=${account['equity']:,.2f}  cash=${account['cash']:,.2f}")
 
-    # Kill switch: halt if drawdown breached
     if risk.check_drawdown(account):
         log.warning("MAX DRAWDOWN BREACHED — halting all trading this session.")
         return
@@ -47,27 +77,7 @@ def run_once():
 
     for symbol in config.WATCHLIST:
         try:
-            bars = broker.get_bars(symbol, days=60)
-            sig = strategy.compute_signals(bars)
-            log.info(f"{symbol}: signal={sig['signal']}  score={sig['score']}  reason={sig['reason']}")
-
-            # --- BUY logic ---
-            if sig["signal"] == "buy" and not risk.already_positioned(symbol, positions):
-                approved, reason = agent.evaluate_signal(symbol, sig)
-                log.info(f"{symbol}: agent={'APPROVE' if approved else 'REJECT'}  ({reason})")
-                if approved:
-                    qty = risk.compute_qty(symbol, sig["price"], account)
-                    order = broker.place_market_order(symbol, qty, "buy")
-                    log.info(f"BUY order placed: {order}")
-
-            # --- SELL logic ---
-            elif sig["signal"] == "sell" and risk.already_positioned(symbol, positions):
-                approved, reason = agent.evaluate_signal(symbol, sig)
-                log.info(f"{symbol}: agent={'APPROVE' if approved else 'REJECT'}  ({reason})")
-                if approved:
-                    result = broker.close_position(symbol)
-                    log.info(f"Position closed: {result}")
-
+            _process_symbol(symbol, account, positions)
         except Exception as e:
             log.error(f"{symbol}: error during tick — {e}", exc_info=True)
 

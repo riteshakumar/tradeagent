@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import config
 
 
 def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -66,12 +67,48 @@ def compute_signals(bars: list[dict]) -> dict:
         score -= 1
         reasons.append("price below EMA20 < EMA50 (downtrend)")
 
-    signal = "buy" if score >= 3 else "sell" if score <= -3 else "hold"
+    NO_SIGNAL = "no strong signal"
+
+    t = config.SIGNAL_THRESHOLD
+    if score >= t:
+        signal = "buy"
+    elif score <= -t:
+        signal = "sell"
+    else:
+        signal = "hold"
 
     return {
         "signal": signal,
         "score": score,
         "rsi": round(last_rsi, 2),
         "price": round(price, 2),
-        "reason": "; ".join(reasons) if reasons else "no strong signal",
+        "reason": "; ".join(reasons) if reasons else NO_SIGNAL,
+        "event_score": 0,
+        "event_reasons": [],
+    }
+
+
+def apply_event_score(quant: dict, event: dict) -> dict:
+    """Merge event score into a quant signal dict and recompute final signal."""
+    NO_SIGNAL = "no strong signal"
+    combined = quant["score"] + event["event_score"]
+
+    base_reasons = [] if quant["reason"] == NO_SIGNAL else [quant["reason"]]
+    all_reasons = base_reasons + event["event_reasons"]
+
+    t = config.SIGNAL_THRESHOLD
+    if combined >= t:
+        signal = "buy"
+    elif combined <= -t:
+        signal = "sell"
+    else:
+        signal = "hold"
+
+    return {
+        **quant,
+        "signal": signal,
+        "score": combined,
+        "event_score": event["event_score"],
+        "event_reasons": event["event_reasons"],
+        "reason": "; ".join(all_reasons) if all_reasons else NO_SIGNAL,
     }

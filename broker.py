@@ -1,15 +1,24 @@
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
+from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from datetime import datetime, timedelta
 import config
 
 
 _trading = TradingClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY, paper=config.PAPER_TRADING)
 _data = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
+
+# Map config string → (TimeFrame, lookback timedelta)
+_TIMEFRAME_MAP = {
+    "1Min":  (TimeFrame(1,  TimeFrameUnit.Minute), timedelta(days=2)),
+    "5Min":  (TimeFrame(5,  TimeFrameUnit.Minute), timedelta(days=5)),
+    "15Min": (TimeFrame(15, TimeFrameUnit.Minute), timedelta(days=10)),
+    "1Hour": (TimeFrame(1,  TimeFrameUnit.Hour),   timedelta(days=30)),
+    "1Day":  (TimeFrame.Day,                        timedelta(days=60)),
+}
 
 
 def get_account() -> dict:
@@ -37,11 +46,13 @@ def get_positions() -> list[dict]:
     ]
 
 
-def get_bars(symbol: str, days: int = 60) -> list[dict]:
+def get_bars(symbol: str, timeframe: str | None = None) -> list[dict]:
+    tf_key = timeframe or config.BAR_TIMEFRAME
+    tf, lookback = _TIMEFRAME_MAP.get(tf_key, _TIMEFRAME_MAP["5Min"])
     req = StockBarsRequest(
         symbol_or_symbols=symbol,
-        timeframe=TimeFrame.Day,
-        start=datetime.now() - timedelta(days=days),
+        timeframe=tf,
+        start=datetime.now() - lookback,
     )
     bars = _data.get_stock_bars(req)[symbol]
     return [
