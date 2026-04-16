@@ -70,20 +70,51 @@ def resolve_sector(symbol: str) -> str:
     return _DEFAULT_SYMBOL_SECTORS.get(sym, "unknown")
 
 
-def compute_qty(price: float, account: dict, atr: float | None = None) -> float:
-    """ATR-based fixed-fractional sizing, bounded by max position exposure."""
-    portfolio = account["portfolio_value"]
-    max_dollars = portfolio * config.MAX_POSITION_PCT
+def compute_qty(
+    price: float,
+    account: dict,
+    atr: float | None = None,
+    realized_vol: float | None = None,
+) -> float:
+    """
+    Volatility-adjusted position sizing.
+
+    Priority:
+    1. Vol-targeting (if realized_vol provided): size so each position contributes
+       equal annualized dollar volatility → TSLA gets smaller positions than MSFT.
+       Formula: qty = (portfolio × RISK_PCT) / (price × annual_vol)
+    2. ATR-based (fallback if atr provided): qty = risk_dollars / (1.5 × ATR)
+    3. Fixed-fraction (last resort): qty = max_dollars / price
+
+    All methods are capped by MAX_POSITION_PCT of portfolio value.
+    """
+    portfolio    = float(account["portfolio_value"])
+    max_dollars  = portfolio * config.MAX_POSITION_PCT
+    risk_dollars = portfolio * config.RISK_PER_TRADE_PCT
+
     if price <= 0:
         return 1.0
 
-    if atr and atr > 0:
-        risk_dollars = portfolio * config.RISK_PER_TRADE_PCT
+    qty: float
+
+    if realized_vol and realized_vol > 0:
+        # Annualise daily vol: annual_vol = daily_vol × sqrt(252)
+        annual_vol = realized_vol * (252 ** 0.5)
+        dollar_vol_per_share = price * annual_vol
+        if dollar_vol_per_share > 0:
+            vol_qty = risk_dollars / dollar_vol_per_share
+            qty = min(vol_qty, max_dollars / price)
+        else:
+            qty = max_dollars / price
+
+    elif atr and atr > 0:
         stop_dist = 1.5 * atr
-        atr_qty = risk_dollars / stop_dist if stop_dist > 0 else 0
+        atr_qty   = risk_dollars / stop_dist if stop_dist > 0 else 0
         qty = min(atr_qty, max_dollars / price)
+
     else:
         qty = max_dollars / price
+
     return max(1.0, round(qty, 0))
 
 

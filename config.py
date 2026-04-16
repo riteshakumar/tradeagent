@@ -103,7 +103,7 @@ MAX_POSITION_PCT = _env_float("MAX_POSITION_PCT", 0.10, minimum=0.0, maximum=1.0
 RISK_PER_TRADE_PCT = _env_float("RISK_PER_TRADE_PCT", 0.01, minimum=0.0, maximum=1.0)
 MAX_DRAWDOWN_PCT = _env_float("MAX_DRAWDOWN_PCT", 0.10, minimum=0.0, maximum=1.0)
 LOOP_INTERVAL_SEC = _env_int("LOOP_INTERVAL_SEC", 300, minimum=5)
-SIGNAL_THRESHOLD = _env_int("SIGNAL_THRESHOLD", 3, minimum=1, maximum=10)
+SIGNAL_THRESHOLD = _env_int("SIGNAL_THRESHOLD", 4, minimum=1, maximum=10)
 
 # Bar timeframe: "1Min" | "5Min" | "15Min" | "1Hour" | "1Day"
 BAR_TIMEFRAME = os.getenv("BAR_TIMEFRAME", "5Min").strip() or "5Min"

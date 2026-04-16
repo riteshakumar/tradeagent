@@ -26,6 +26,12 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# In-memory trailing stop state: symbol → highest price seen since entry
+_peak_prices: dict[str, float] = {}
+
+# In-memory partial scale-out tracking: symbol → True once 50% already sold
+_partial_done: dict[str, bool] = {}
+
 
 def _get_clock():
     from alpaca.trading.client import TradingClient
@@ -34,8 +40,61 @@ def _get_clock():
     return client.get_clock()
 
 
+def _get_market_trend() -> int:
+    """
+    Return +1 if SPY is above its 200-day EMA (bull market), -1 if below.
+    Returns 0 (neutral) on any error so trading is never inadvertently blocked.
+    """
+    try:
+        spy_bars = broker.get_bars("SPY", timeframe=config.BAR_TIMEFRAME)
+        if not spy_bars or len(spy_bars) < 30:
+            return 0
+        import pandas as _pd
+        closes = _pd.Series([float(b["c"]) for b in spy_bars])
+        ema200 = closes.ewm(span=200, adjust=False).mean()
+        return 1 if float(closes.iloc[-1]) >= float(ema200.iloc[-1]) else -1
+    except Exception as exc:
+        log.debug("SPY market trend check failed: %s", exc)
+        return 0
+
+
 def is_market_open() -> bool:
     return _get_clock().is_open
+
+
+def _rank_by_relative_strength(watchlist: list[str]) -> list[str]:
+    """
+    Rank watchlist symbols by 20-day return relative to SPY.
+    Returns top 60% (min 2) by relative strength — strongest performers first.
+    Falls back to original order on any error.
+    """
+    try:
+        spy_bars = broker.get_bars("SPY", timeframe="1Day", lookback_days=30)
+        if not spy_bars or len(spy_bars) < 2:
+            return watchlist
+        spy_ret = float(spy_bars[-1]["c"]) / float(spy_bars[0]["c"]) - 1
+
+        ranked: list[tuple[str, float]] = []
+        for sym in watchlist:
+            try:
+                bars = broker.get_bars(sym, timeframe="1Day", lookback_days=30)
+                if not bars or len(bars) < 2:
+                    ranked.append((sym, 0.0))
+                    continue
+                sym_ret = float(bars[-1]["c"]) / float(bars[0]["c"]) - 1
+                ranked.append((sym, sym_ret - spy_ret))
+            except Exception:
+                ranked.append((sym, 0.0))
+
+        ranked.sort(key=lambda x: x[1], reverse=True)
+        n = max(2, int(len(ranked) * 0.6))
+        selected = [sym for sym, _ in ranked[:n]]
+        log.info("RS ranking (top %d/%d): %s", n, len(ranked),
+                 [(s, f"{rs:+.1%}") for s, rs in ranked[:n]])
+        return selected
+    except Exception as exc:
+        log.debug("RS ranking failed: %s", exc)
+        return watchlist
 
 
 def _smart_sleep() -> None:
@@ -114,11 +173,28 @@ def _current_positions() -> list[dict]:
 
 def _check_sl_tp(position: dict) -> bool:
     symbol = position["symbol"]
-    pnl_pct = float(position["unrealized_pnl_pct"])
+    current_price = float(position["current_price"])
+    avg_entry = float(position.get("avg_entry", current_price))
     side = position.get("side", "long")
 
-    if config.STOP_LOSS_PCT > 0 and pnl_pct <= -config.STOP_LOSS_PCT:
-        log.warning("%s: STOP LOSS hit (%.2f%%) - closing %s", symbol, pnl_pct * 100, side)
+    # Update trailing peak for this position
+    if symbol not in _peak_prices:
+        _peak_prices[symbol] = avg_entry
+    if current_price > _peak_prices[symbol]:
+        _peak_prices[symbol] = current_price
+    peak = _peak_prices[symbol]
+
+    # Trailing stop: trail from peak, not entry
+    trailing_stop_hit = config.STOP_LOSS_PCT > 0 and current_price <= peak * (1 - config.STOP_LOSS_PCT)
+    # pnl_pct still used for take-profit (measured from entry)
+    pnl_pct = (current_price - avg_entry) / avg_entry if avg_entry > 0 else 0.0
+
+    if trailing_stop_hit:
+        log.warning(
+            "%s: TRAILING STOP hit (price=%.2f peak=%.2f trail=%.2f%%) - closing %s",
+            symbol, current_price, peak, config.STOP_LOSS_PCT * 100, side,
+        )
+        _peak_prices.pop(symbol, None)
         if config.SHADOW_MODE:
             trade = shadow_book.close_position(symbol, float(position["current_price"]), reason="stop_loss")
             if trade:
@@ -133,6 +209,7 @@ def _check_sl_tp(position: dict) -> bool:
 
     if config.TAKE_PROFIT_PCT > 0 and pnl_pct >= config.TAKE_PROFIT_PCT:
         log.info("%s: TAKE PROFIT hit (%.2f%%) - closing %s", symbol, pnl_pct * 100, side)
+        _peak_prices.pop(symbol, None)
         if config.SHADOW_MODE:
             trade = shadow_book.close_position(symbol, float(position["current_price"]), reason="take_profit")
             if trade:
@@ -159,7 +236,12 @@ def _place_buy(symbol: str, sig: dict, account: dict, positions: list[dict], wat
     if not approved:
         return False
 
-    qty = risk.compute_qty(sig["price"], account, atr=sig.get("atr"))
+    # Vol-targeting: pass realized_vol from signal for volatility-adjusted sizing
+    qty = risk.compute_qty(
+        sig["price"], account,
+        atr=sig.get("atr"),
+        realized_vol=sig.get("regime_realized_vol"),
+    )
     if config.SHADOW_MODE:
         shadow_book.record_intent(symbol, "buy", qty, sig["price"], sig["reason"], sig["score"])
         shadow_book.open_position(symbol, "long", qty, sig["price"], sig["reason"], sig["score"])
@@ -240,6 +322,7 @@ def _close_long(symbol: str, sig: dict, positions: list[dict], watchlist: list[s
         log.info("[DRY RUN] Would CLOSE LONG %s", symbol)
         return True
 
+    _peak_prices.pop(symbol, None)
     result = broker.close_position(symbol)
     alerts.order_alert(symbol, "sell", pos["qty"], pos["current_price"], result.get("order_id", ""))
     alerts.signal_alert(symbol, "sell", sig["score"], sig["price"], sig["reason"])
@@ -297,7 +380,7 @@ def _maybe_run_events(symbol: str, sig: dict) -> dict:
     return sig
 
 
-def _process_symbol(symbol: str, watchlist: list[str]) -> None:
+def _process_symbol(symbol: str, watchlist: list[str], market_trend: int = 0) -> None:
     account = broker.get_account()
     positions = _current_positions()
     pos = next((p for p in positions if p["symbol"] == symbol), None)
@@ -305,15 +388,20 @@ def _process_symbol(symbol: str, watchlist: list[str]) -> None:
         return
 
     bars = broker.get_bars(symbol, timeframe=config.BAR_TIMEFRAME)
-    sig = strategy.compute_signals(bars)
+    earnings_soon = events.is_earnings_period(symbol) if config.USE_AGENT else False
+    if earnings_soon:
+        log.info("%s: earnings period detected - buy suppressed", symbol)
+    sig = strategy.compute_signals(bars, market_trend=market_trend, earnings_soon=earnings_soon)
     sig = _maybe_run_events(symbol, sig)
     if config.SHADOW_MODE and sig.get("price"):
         shadow_book.update_mark(symbol, sig["price"])
 
     log.info(
-        "%s: regime=%s signal=%s score=%s reason=%s",
+        "%s: regime=%s mkt_trend=%s adx=%.1f signal=%s score=%s reason=%s",
         symbol,
         sig.get("regime", "n/a"),
+        "bull" if market_trend == 1 else ("bear" if market_trend == -1 else "?"),
+        sig.get("adx") or 0.0,
         sig["signal"],
         sig["score"],
         sig["reason"],
@@ -362,14 +450,19 @@ def run_once() -> None:
     log.info("Open positions: %s", [f"{p['symbol']}:{p.get('side','long')}" for p in positions])
 
     watchlist = get_active_watchlist()
+    watchlist = _rank_by_relative_strength(watchlist)  # trade only top RS symbols
     if config.SHADOW_MODE:
         log.info("[SHADOW MODE] Hypothetical orders only. Outcomes recorded to shadow_book.json")
     elif config.DRY_RUN:
         log.info("[DRY RUN] No orders will be placed.")
 
+    # Fetch SPY market trend once per tick — shared across all symbols
+    market_trend = _get_market_trend()
+    log.info("Market trend (SPY vs EMA200): %s", "BULL" if market_trend == 1 else ("BEAR" if market_trend == -1 else "UNKNOWN"))
+
     for symbol in watchlist:
         try:
-            _process_symbol(symbol, watchlist)
+            _process_symbol(symbol, watchlist, market_trend=market_trend)
         except Exception as exc:
             log.error("%s: error during tick - %s", symbol, exc, exc_info=True)
 

@@ -197,6 +197,59 @@ def macro_signal(symbol: str) -> dict:
     return result
 
 
+# ── Earnings proximity detection ──────────────────────────────────────────────
+def is_earnings_period(symbol: str, pre_days: int = 5, post_days: int = 2) -> bool:
+    """
+    Return True if the symbol is in an earnings risk window:
+      - Earnings imminent: upcoming earnings language detected in recent news
+      - Just reported: earnings headline within the last post_days days
+
+    Uses Alpaca news API. Returns False on any error (fail-open for trading).
+    pre_days:  block new buys this many days BEFORE expected earnings
+    post_days: block new buys this many days AFTER earnings (post-earnings vol)
+    """
+    try:
+        from datetime import datetime, timezone, timedelta
+        news = fetch_news(
+            symbols=[symbol],
+            keywords="earnings report quarterly results EPS guidance beat miss",
+            limit=15,
+        )
+        now = datetime.now(timezone.utc)
+
+        for n in news:
+            headline = n.get("headline", "").lower()
+            if not headline or "[news fetch error" in headline:
+                break
+
+            # Check if the news is very recent (post-earnings vol window)
+            created_str = n.get("created", "")
+            if created_str:
+                try:
+                    dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                    age_days = (now - dt).total_seconds() / 86400
+                    if age_days <= post_days:
+                        earnings_kws = ("earnings", "eps", "quarterly result", "reports q", "beat", "miss", "guidance")
+                        if any(kw in headline for kw in earnings_kws):
+                            return True  # Just reported — stay out of the vol
+                except Exception:
+                    pass
+
+            # Check for upcoming earnings language
+            upcoming_patterns = (
+                "reports on", "will report", "scheduled to report",
+                "earnings date", "due to report", "reports earnings",
+                "earnings call", "q1 earnings", "q2 earnings",
+                "q3 earnings", "q4 earnings", "fiscal", "announces results",
+            )
+            if any(p in headline for p in upcoming_patterns):
+                return True  # Upcoming earnings detected
+
+        return False
+    except Exception:
+        return False  # Fail-open: don't block trading on API errors
+
+
 # ── Unified event score for a symbol ──────────────────────────────────────────
 def get_event_score(symbol: str, run_earnings: bool = True, run_geo: bool = True, run_macro: bool = True) -> dict:
     """

@@ -32,19 +32,31 @@ def _apply_slippage(price: float, side: str, slippage_bps: float) -> float:
     return price * (1 - slip)
 
 
-def _check_bar_exit(entry_price: float, bar: pd.Series, stop_loss_pct: float, take_profit_pct: float) -> tuple[float, str] | None:
-    """Returns (exit_price, reason) if stop/tp hit intrabar; conservative ordering prefers stop first."""
+def _check_bar_exit(
+    entry_price: float,
+    peak_price: float,
+    bar: pd.Series,
+    stop_loss_pct: float,
+    take_profit_pct: float,
+) -> tuple[float, str] | None:
+    """
+    Returns (exit_price, reason) if stop/TP hit intrabar.
+    Stop is trailing: trails from peak_price (highest close since entry), not entry_price.
+    This lets winners run before stopping out.
+    Conservative ordering: stop checked before take-profit.
+    """
     low = float(bar["l"])
     high = float(bar["h"])
-    stop_px = entry_price * (1 - stop_loss_pct) if stop_loss_pct > 0 else None
+    # Trailing stop: trail from highest point reached since entry
+    stop_px = peak_price * (1 - stop_loss_pct) if stop_loss_pct > 0 else None
     take_px = entry_price * (1 + take_profit_pct) if take_profit_pct > 0 else None
 
     stop_hit = stop_px is not None and low <= stop_px
     take_hit = take_px is not None and high >= take_px
     if stop_hit and take_hit:
-        return stop_px, "stop_loss"
+        return stop_px, "trailing_stop"
     if stop_hit:
-        return stop_px, "stop_loss"
+        return stop_px, "trailing_stop"
     if take_hit:
         return take_px, "take_profit"
     return None
@@ -122,12 +134,25 @@ def _simulate(
     take_profit_pct: float,
     slippage_bps: float,
     fee_per_trade: float,
+    warmup_override: int | None = None,
+    market_trend_by_date: dict[str, int] | None = None,
 ) -> tuple[list[dict], list[dict], float]:
-    warmup = min(30, len(df) // 3)
+    """
+    Simulate trades on df.
+
+    market_trend_by_date: dict mapping "YYYY-MM-DD" → +1 (SPY bullish) or -1 (SPY bearish).
+    When SPY is bearish, buy signals are suppressed via strategy.compute_signals(market_trend=-1).
+    """
+    warmup = warmup_override if warmup_override is not None else min(20, len(df) // 4)
     cash = float(initial_cash)
     position_qty = 0
     entry_px = 0.0
+    peak_px = 0.0       # Trailing stop: highest close since entry
+    entry_atr = 0.0     # ATR at entry time — used for partial scale-out target
+    partial_done = False  # True once the first 50% scale-out has been taken
     entry_date = ""
+    stop_cooldown = 0   # bars remaining before new entry allowed after a stop-loss
+    _STOP_COOLDOWN_BARS = 3
     trades: list[dict] = []
     equity_curve: list[dict] = []
 
@@ -136,10 +161,20 @@ def _simulate(
         bar = df.iloc[i]
         price = float(bar["c"])
         ts = bar["t"].strftime("%Y-%m-%d %H:%M")
+        bar_date = ts[:10]  # "YYYY-MM-DD"
 
-        # Intrabar risk exits
+        # Tick down cooldown counter
+        if stop_cooldown > 0:
+            stop_cooldown -= 1
+
+        # Update trailing peak whenever we hold a position
         if position_qty > 0:
-            exit_on_bar = _check_bar_exit(entry_px, bar, stop_loss_pct, take_profit_pct)
+            if price > peak_px:
+                peak_px = price
+
+        # Intrabar risk exits (trailing stop trails from peak_px)
+        if position_qty > 0:
+            exit_on_bar = _check_bar_exit(entry_px, peak_px, bar, stop_loss_pct, take_profit_pct)
             if exit_on_bar is not None:
                 raw_exit_px, reason = exit_on_bar
                 fill_exit_px = _apply_slippage(raw_exit_px, "sell", slippage_bps)
@@ -158,12 +193,49 @@ def _simulate(
                 )
                 position_qty = 0
                 entry_px = 0.0
+                peak_px = 0.0
+                entry_atr = 0.0
+                partial_done = False
                 entry_date = ""
+                if "stop" in reason:
+                    stop_cooldown = _STOP_COOLDOWN_BARS
 
-        sig = strategy.compute_signals(window.to_dict("records"))
+        # Market trend gate: look up SPY status for this bar's date
+        mt = 0
+        if market_trend_by_date:
+            mt = market_trend_by_date.get(bar_date, 0)
+
+        sig = strategy.compute_signals(window.to_dict("records"), market_trend=mt)
         signal = _signal_for_threshold(sig["score"], threshold)
+        if mt == -1 and signal == "buy":
+            signal = "hold"
 
-        if signal == "buy" and position_qty == 0 and cash > price:
+        # ------------------------------------------------------------------
+        # Partial scale-out: sell 50% when price reaches entry + 1.5×ATR.
+        # Locks in profit on half the position; trails the rest with stop.
+        # ------------------------------------------------------------------
+        if position_qty >= 2 and not partial_done and entry_atr > 0:
+            partial_target = entry_px + 1.5 * entry_atr
+            if price >= partial_target:
+                partial_qty = position_qty // 2
+                fill_partial = _apply_slippage(price, "sell", slippage_bps)
+                cash += partial_qty * fill_partial - fee_per_trade
+                trades.append(
+                    _make_trade(
+                        symbol=symbol,
+                        entry_px=entry_px,
+                        exit_px=fill_partial,
+                        qty=partial_qty,
+                        entry_date=entry_date,
+                        exit_date=ts,
+                        exit_reason="partial_profit",
+                        fees=2 * fee_per_trade,
+                    )
+                )
+                position_qty -= partial_qty
+                partial_done = True
+
+        if signal == "buy" and position_qty == 0 and cash > price and stop_cooldown == 0:
             qty = max(1, int((cash * config.MAX_POSITION_PCT) / price))
             fill_entry_px = _apply_slippage(price, "buy", slippage_bps)
             required_cash = qty * fill_entry_px + fee_per_trade
@@ -171,6 +243,9 @@ def _simulate(
                 cash -= required_cash
                 position_qty = qty
                 entry_px = fill_entry_px
+                peak_px = fill_entry_px
+                entry_atr = float(sig.get("atr") or 0.0)
+                partial_done = False
                 entry_date = ts
 
         elif signal == "sell" and position_qty > 0:
@@ -190,6 +265,9 @@ def _simulate(
             )
             position_qty = 0
             entry_px = 0.0
+            peak_px = 0.0
+            entry_atr = 0.0
+            partial_done = False
             entry_date = ""
 
         equity_curve.append({"date": ts, "equity": round(cash + position_qty * price, 2)})
@@ -234,6 +312,31 @@ def _spy_benchmark(timeframe: str, days: int, initial_cash: float) -> list[dict]
         return None
 
 
+def _build_spy_trend(timeframe: str, days: int) -> dict[str, int]:
+    """
+    Fetch SPY bars and return a date → market_trend dict.
+    +1 = SPY close above its 200-day EMA (bull market)
+    -1 = SPY close below its 200-day EMA (bear market)
+    Keys are "YYYY-MM-DD" strings for easy lookup by bar date.
+    Falls back to empty dict (neutral) if SPY data unavailable.
+    """
+    try:
+        spy_bars = broker.get_bars("SPY", timeframe=timeframe, lookback_days=days)
+        if not spy_bars:
+            return {}
+        spy_df = pd.DataFrame(spy_bars)
+        spy_df["c"] = spy_df["c"].astype(float)
+        spy_df["t"] = pd.to_datetime(spy_df["t"])
+        ema200 = spy_df["c"].ewm(span=200, adjust=False).mean()
+        trend: dict[str, int] = {}
+        for idx in range(len(spy_df)):
+            date_str = spy_df["t"].iloc[idx].strftime("%Y-%m-%d")
+            trend[date_str] = 1 if spy_df["c"].iloc[idx] >= ema200.iloc[idx] else -1
+        return trend
+    except Exception:
+        return {}
+
+
 def run(
     symbol: str,
     timeframe: str = "1Day",
@@ -258,6 +361,9 @@ def run(
     df["l"] = df["l"].astype(float)
     df["t"] = pd.to_datetime(df["t"])
 
+    # Pre-build SPY trend dict for market regime gate (skip SPY itself)
+    spy_trend = _build_spy_trend(timeframe, days) if symbol != "SPY" else {}
+
     trades, equity_curve, final_equity = _simulate(
         df=df,
         symbol=symbol,
@@ -267,6 +373,7 @@ def run(
         take_profit_pct=config.TAKE_PROFIT_PCT,
         slippage_bps=config.BACKTEST_SLIPPAGE_BPS,
         fee_per_trade=config.BACKTEST_FEE_PER_TRADE,
+        market_trend_by_date=spy_trend,
     )
     stats = _compute_stats(trades, initial_cash, final_equity, equity_curve)
     benchmark = _spy_benchmark(timeframe, days, initial_cash)
@@ -304,6 +411,8 @@ def walk_forward(
     df["l"] = df["l"].astype(float)
     df["t"] = pd.to_datetime(df["t"])
 
+    spy_trend = _build_spy_trend(timeframe, lookback_days) if symbol != "SPY" else {}
+
     fold_size = n // n_splits
     folds = []
     for i in range(n_splits):
@@ -311,12 +420,14 @@ def walk_forward(
         end = start + fold_size if i < n_splits - 1 else n
         fold_df = df.iloc[start:end].reset_index(drop=True)
         split = int(len(fold_df) * 0.7)
-        oos_df = fold_df.iloc[split:].reset_index(drop=True)
-        if len(oos_df) < 10:
+        # Pass full fold (training + OOS) so indicators have enough history.
+        # warmup_override=split means the training portion is used only for indicator
+        # warm-up; trades are only generated during the OOS (out-of-sample) window.
+        if len(fold_df) - split < 5:
             continue
 
         trades, equity_curve, final_equity = _simulate(
-            df=oos_df,
+            df=fold_df,
             symbol=symbol,
             initial_cash=initial_cash,
             threshold=config.SIGNAL_THRESHOLD,
@@ -324,6 +435,8 @@ def walk_forward(
             take_profit_pct=config.TAKE_PROFIT_PCT,
             slippage_bps=config.BACKTEST_SLIPPAGE_BPS,
             fee_per_trade=config.BACKTEST_FEE_PER_TRADE,
+            warmup_override=split,
+            market_trend_by_date=spy_trend,
         )
         stats = _compute_stats(trades, initial_cash, final_equity, equity_curve)
         folds.append(
@@ -377,6 +490,8 @@ def optimize(
     df["l"] = df["l"].astype(float)
     df["t"] = pd.to_datetime(df["t"])
 
+    spy_trend = _build_spy_trend(timeframe, lookback_days) if symbol != "SPY" else {}
+
     thresholds = [2, 3, 4, 5]
     sl_values = [0.02, 0.05, 0.08]
     tp_values = [0.05, 0.10, 0.15, 0.20]
@@ -392,6 +507,7 @@ def optimize(
             take_profit_pct=tp,
             slippage_bps=config.BACKTEST_SLIPPAGE_BPS,
             fee_per_trade=config.BACKTEST_FEE_PER_TRADE,
+            market_trend_by_date=spy_trend,
         )
         stats = _compute_stats(trades, initial_cash, final_equity, equity_curve)
         results.append(
