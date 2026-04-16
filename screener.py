@@ -95,9 +95,27 @@ def etf_list(themes: list[str] | None = None) -> list[str]:
     return symbols
 
 
-def _clean(symbols: list[str]) -> list[str]:
-    """Remove error placeholders and non-standard tickers (warrants, rights, units)."""
-    return [s for s in symbols if s != "ERROR" and "." not in s and len(s) <= 5]
+def _clean(rows: list[dict], price_field: str = "price") -> list[str]:
+    """
+    Filter out:
+    - error placeholders
+    - non-standard tickers (warrants, rights: contain '.' or len > 5)
+    - stocks below MIN_STOCK_PRICE
+    - stocks below MIN_STOCK_VOLUME (if volume field present)
+    """
+    out = []
+    for r in rows:
+        sym = r.get("symbol", "")
+        if sym == "ERROR" or "." in sym or len(sym) > 5:
+            continue
+        price = r.get(price_field) or r.get("price")
+        if price is not None and float(price) < config.MIN_STOCK_PRICE:
+            continue
+        vol = r.get("volume")
+        if vol is not None and float(vol) < config.MIN_STOCK_VOLUME:
+            continue
+        out.append(sym)
+    return out
 
 
 def build_watchlist(source: str, top_n: int = 10, etf_themes: list[str] | None = None) -> list[str]:
@@ -106,11 +124,11 @@ def build_watchlist(source: str, top_n: int = 10, etf_themes: list[str] | None =
     source: "static" | "most_active" | "gainers" | "losers" | "etf"
     """
     if source == "most_active":
-        return _clean([s["symbol"] for s in most_active(top_n)])
+        return _clean(most_active(top_n))
     if source == "gainers":
-        return _clean([s["symbol"] for s in top_gainers(top_n)])
+        return _clean(top_gainers(top_n))
     if source == "losers":
-        return _clean([s["symbol"] for s in top_losers(top_n)])
+        return _clean(top_losers(top_n))
     if source == "etf":
         return etf_list(etf_themes)
     return config.WATCHLIST  # fallback to static

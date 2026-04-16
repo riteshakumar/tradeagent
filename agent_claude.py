@@ -68,13 +68,16 @@ def evaluate_signal(symbol: str, signal: dict) -> tuple[bool, str]:
 
     # Agentic loop — run until Claude calls approve_trade
     for _ in range(6):  # safety cap on iterations
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=512,
-            system=system,
-            tools=TOOLS,
-            messages=messages,
-        )
+        try:
+            response = client.messages.create(
+                model=config.ANTHROPIC_MODEL,
+                max_tokens=512,
+                system=system,
+                tools=TOOLS,
+                messages=messages,
+            )
+        except Exception as exc:
+            return False, f"claude agent error: {exc}"
 
         messages.append({"role": "assistant", "content": response.content})
 

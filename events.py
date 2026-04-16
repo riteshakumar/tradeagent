@@ -79,7 +79,7 @@ def _llm_score(prompt: str) -> dict:
         import openai
         client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
         resp = client.chat.completions.create(
-            model="gpt-4o",
+            model=config.OPENAI_MODEL,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
             max_tokens=100,
             temperature=0,
@@ -89,7 +89,7 @@ def _llm_score(prompt: str) -> dict:
         import anthropic
         client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
         resp = client.messages.create(
-            model="claude-sonnet-4-6",
+            model=config.ANTHROPIC_MODEL,
             max_tokens=100,
             system=system,
             messages=[{"role": "user", "content": prompt}],

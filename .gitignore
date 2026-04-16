@@ -4,3 +4,7 @@ __pycache__/
 venv/
 .venv/
 *.log
+watchlist.json
+settings.json
+shadow_book.json
+.pytest_cache/

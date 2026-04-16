@@ -79,11 +79,15 @@ def evaluate_signal(symbol: str, signal: dict) -> tuple[bool, str]:
     ]
 
     for _ in range(6):
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            tools=TOOLS,
-            messages=messages,
-        )
+        try:
+            response = client.chat.completions.create(
+                model=config.OPENAI_MODEL,
+                tools=TOOLS,
+                messages=messages,
+                temperature=0,
+            )
+        except Exception as exc:
+            return False, f"openai agent error: {exc}"
 
         msg = response.choices[0].message
         messages.append(msg)
