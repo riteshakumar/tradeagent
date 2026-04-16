@@ -363,3 +363,54 @@ def snapshot() -> dict:
         "daily_loss_halted": _daily_loss_halted,
         "daily_loss_pct": _daily_loss_pct,
     }
+
+
+def check_time_of_day(now: datetime | None = None) -> tuple[bool, str]:
+    """
+    Block new entries during the first MARKET_OPEN_BUFFER_MIN minutes after
+    open and the last MARKET_CLOSE_BUFFER_MIN minutes before close (ET).
+    Returns (ok, reason).
+    """
+    if config.MARKET_OPEN_BUFFER_MIN <= 0 and config.MARKET_CLOSE_BUFFER_MIN <= 0:
+        return True, "time filter disabled"
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import timedelta
+        et = ZoneInfo("America/New_York")
+        ts = (now or _now_utc()).astimezone(et)
+        base = ts.replace(second=0, microsecond=0)
+        mkt_open  = base.replace(hour=9,  minute=30)
+        mkt_close = base.replace(hour=16, minute=0)
+        open_cutoff  = mkt_open  + timedelta(minutes=config.MARKET_OPEN_BUFFER_MIN)
+        close_cutoff = mkt_close - timedelta(minutes=config.MARKET_CLOSE_BUFFER_MIN)
+        if ts < open_cutoff:
+            mins_left = int((open_cutoff - ts).total_seconds() / 60) + 1
+            return False, f"opening buffer active ({mins_left}min remaining)"
+        if ts > close_cutoff:
+            return False, f"closing buffer active (last {config.MARKET_CLOSE_BUFFER_MIN}min of session)"
+    except Exception as exc:
+        log.debug("time-of-day check error: %s", exc)
+    return True, "ok"
+
+
+def check_gap(bars: list[dict], max_gap_pct: float | None = None) -> tuple[bool, str]:
+    """
+    Block entries when the most recent bar opened with a gap larger than
+    max_gap_pct vs the previous close (catches gap-up chasing / gap-down panic).
+    Returns (ok, reason).
+    """
+    threshold = max_gap_pct if max_gap_pct is not None else config.GAP_FILTER_PCT
+    if threshold <= 0 or len(bars) < 2:
+        return True, "gap filter disabled"
+    try:
+        prev_close = float(bars[-2]["c"])
+        curr_open  = float(bars[-1].get("o", bars[-1]["c"]))
+        if prev_close <= 0:
+            return True, "invalid prev close"
+        gap = (curr_open - prev_close) / prev_close
+        if abs(gap) >= threshold:
+            direction = "up" if gap > 0 else "down"
+            return False, f"gap-{direction} {abs(gap)*100:.1f}% exceeds {threshold*100:.0f}% filter"
+    except Exception as exc:
+        log.debug("gap check error: %s", exc)
+    return True, "ok"

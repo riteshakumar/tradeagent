@@ -99,6 +99,11 @@ TAKE_PROFIT_PCT = _env_float("TAKE_PROFIT_PCT", 0.10, minimum=0.0, maximum=10.0)
 
 # Trading params
 WATCHLIST = _env_list("WATCHLIST", ["AAPL", "MSFT", "NVDA", "TSLA"])
+# Dynamic watchlist source for the trading loop:
+# "static" | "most_active" | "gainers" | "trending" | "sector" | "etf"
+WATCHLIST_SOURCE = os.getenv("WATCHLIST_SOURCE", "static").strip().lower() or "static"
+WATCHLIST_SECTORS = _env_list("WATCHLIST_SECTORS", [])   # e.g. "Tech,Finance"
+WATCHLIST_TOP_N   = _env_int("WATCHLIST_TOP_N", 10, minimum=3, maximum=50)
 MAX_POSITION_PCT = _env_float("MAX_POSITION_PCT", 0.10, minimum=0.0, maximum=1.0)
 RISK_PER_TRADE_PCT = _env_float("RISK_PER_TRADE_PCT", 0.01, minimum=0.0, maximum=1.0)
 MAX_DRAWDOWN_PCT = _env_float("MAX_DRAWDOWN_PCT", 0.10, minimum=0.0, maximum=1.0)
@@ -140,6 +145,22 @@ TREND_STRENGTH_THRESHOLD = _env_float("TREND_STRENGTH_THRESHOLD", 0.012, minimum
 # Backtest realism knobs
 BACKTEST_SLIPPAGE_BPS = _env_float("BACKTEST_SLIPPAGE_BPS", 2.0, minimum=0.0, maximum=500.0)
 BACKTEST_FEE_PER_TRADE = _env_float("BACKTEST_FEE_PER_TRADE", 0.0, minimum=0.0, maximum=10_000.0)
+
+# ── Hybrid intelligence controls ───────────────────────────────────────────────
+MULTI_TIMEFRAME_ENABLED    = _env_bool("MULTI_TIMEFRAME_ENABLED", True)
+GAP_FILTER_PCT             = _env_float("GAP_FILTER_PCT", 0.03, minimum=0.0, maximum=0.5)
+MARKET_OPEN_BUFFER_MIN     = _env_int("MARKET_OPEN_BUFFER_MIN", 30, minimum=0)
+MARKET_CLOSE_BUFFER_MIN    = _env_int("MARKET_CLOSE_BUFFER_MIN", 30, minimum=0)
+PEER_CHECK_ENABLED         = _env_bool("PEER_CHECK_ENABLED", True)
+PREMARKET_CURATION_ENABLED = _env_bool("PREMARKET_CURATION_ENABLED", True)
+AGENT_SIZE_MULTIPLIER      = _env_bool("AGENT_SIZE_MULTIPLIER", True)
+MIN_SIZE_MULTIPLIER        = _env_float("MIN_SIZE_MULTIPLIER", 0.5, minimum=0.1, maximum=1.0)
+MAX_SIZE_MULTIPLIER        = _env_float("MAX_SIZE_MULTIPLIER", 1.5, minimum=1.0, maximum=3.0)
+AGENT_DYNAMIC_STOPS        = _env_bool("AGENT_DYNAMIC_STOPS", True)
+EXIT_REVIEW_ENABLED        = _env_bool("EXIT_REVIEW_ENABLED", True)
+EXIT_REVIEW_TRIGGER_PCT    = _env_float("EXIT_REVIEW_TRIGGER_PCT", 0.5, minimum=0.0, maximum=1.0)
+MAX_EXIT_HOLDS             = _env_int("MAX_EXIT_HOLDS", 2, minimum=0, maximum=5)
+MACRO_SUPPRESSION_ENABLED  = _env_bool("MACRO_SUPPRESSION_ENABLED", True)
 
 
 def is_order_execution_enabled() -> bool:

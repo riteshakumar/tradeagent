@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 
 import agent
 import alerts
@@ -14,9 +14,11 @@ import broker
 import config
 import events
 import risk
+import screener
 import settings_store
 import shadow_book
 import strategy
+import trade_journal
 import watchlist_store
 
 logging.basicConfig(
@@ -31,6 +33,11 @@ _peak_prices: dict[str, float] = {}
 
 # In-memory partial scale-out tracking: symbol → True once 50% already sold
 _partial_done: dict[str, bool] = {}
+
+_curated_blacklist: set[str] = set()   # tickers with bad news today
+_curate_date: date | None = None       # date curation last ran
+_position_stops: dict[str, float] = {} # symbol → per-position stop pct override
+_exit_holds: dict[str, int] = {}       # symbol → consecutive exit-review holds
 
 
 def _get_clock():
@@ -95,6 +102,119 @@ def _rank_by_relative_strength(watchlist: list[str]) -> list[str]:
     except Exception as exc:
         log.debug("RS ranking failed: %s", exc)
         return watchlist
+
+
+_HIGHER_TF: dict[str, str] = {
+    "1Min": "1Day", "5Min": "1Day", "15Min": "1Day",
+    "1Hour": "1Day", "1Day": "1Hour",
+}
+
+_PEER_OVERRIDE: dict[str, list[str]] = {
+    "AAPL": ["MSFT", "GOOGL"], "MSFT": ["AAPL", "GOOGL"], "GOOGL": ["META", "MSFT"],
+    "NVDA": ["AMD", "AVGO"],   "AMD":  ["NVDA", "INTC"],  "META": ["GOOGL", "SNAP"],
+    "TSLA": ["GM", "RIVN"],    "JPM":  ["BAC", "GS"],     "BAC":  ["JPM", "WFC"],
+    "XOM":  ["CVX", "COP"],    "AMZN": ["MSFT", "GOOGL"],
+}
+
+
+def _get_peers(symbol: str) -> list[str]:
+    if symbol.upper() in _PEER_OVERRIDE:
+        return _PEER_OVERRIDE[symbol.upper()]
+    try:
+        from screener import SECTOR_STOCKS
+        sym = symbol.upper()
+        for stocks in SECTOR_STOCKS.values():
+            if sym in stocks:
+                return [s for s in stocks if s != sym][:2]
+    except Exception:
+        pass
+    return []
+
+
+def _curate_watchlist(watchlist: list[str]) -> None:
+    """
+    On the first tick of each trading day, keyword-scan all watchlist tickers
+    for negative news. Tickers with clearly negative sentiment are blacklisted
+    for the rest of the day. Fast — no LLM calls.
+    """
+    global _curated_blacklist, _curate_date
+    today = date.today()
+    if _curate_date == today or not config.PREMARKET_CURATION_ENABLED:
+        return
+
+    _curated_blacklist = set()
+    _curate_date = today
+    log.info("=== Daily curation scan (%d symbols) ===", len(watchlist))
+    for sym in watchlist:
+        try:
+            trend = events.sentiment_trend(sym)
+            if trend < 0:
+                _curated_blacklist.add(sym)
+                log.warning("Curation: %s BLACKLISTED (negative sentiment)", sym)
+            else:
+                log.debug("Curation: %s ok (sentiment=%+d)", sym, trend)
+        except Exception as exc:
+            log.debug("Curation error for %s: %s", sym, exc)
+    log.info("Curation done — blacklisted: %s", list(_curated_blacklist) or "none")
+
+
+def _check_higher_tf(symbol: str, current_signal: str, market_trend: int) -> tuple[bool, str]:
+    """Return (ok, reason). Blocks counter-trend entries vs the higher timeframe."""
+    if not config.MULTI_TIMEFRAME_ENABLED:
+        return True, "multi-tf disabled"
+    higher_tf = _HIGHER_TF.get(config.BAR_TIMEFRAME)
+    if not higher_tf or higher_tf == config.BAR_TIMEFRAME:
+        return True, "single timeframe mode"
+    try:
+        bars = broker.get_bars(symbol, timeframe=higher_tf, lookback_days=90)
+        if not bars or len(bars) < 30:
+            return True, f"insufficient {higher_tf} data"
+        htf_sig = strategy.compute_signals(bars, market_trend=market_trend)
+        htf = htf_sig["signal"]
+        if current_signal == "buy" and htf == "sell":
+            return False, f"counter-trend: {higher_tf} is SELL (score {htf_sig['score']})"
+        if current_signal == "sell" and htf == "buy":
+            return False, f"counter-trend: {higher_tf} is BUY (score {htf_sig['score']})"
+        return True, f"{higher_tf} confluence: {htf.upper()}"
+    except Exception as exc:
+        log.debug("Higher-TF check failed for %s: %s", symbol, exc)
+        return True, "higher-tf check unavailable"
+
+
+def _check_peers(symbol: str, market_trend: int) -> tuple[bool, str]:
+    """Return (ok, reason). Blocks entry when ALL sector peers are in SELL."""
+    if not config.PEER_CHECK_ENABLED:
+        return True, "peer check disabled"
+    peers = _get_peers(symbol)
+    if not peers:
+        return True, "no peers configured"
+    sell_count = 0
+    for peer in peers:
+        try:
+            bars = broker.get_bars(peer, timeframe="1Day", lookback_days=30)
+            if bars and len(bars) >= 5:
+                sig = strategy.compute_signals(bars, market_trend=market_trend)
+                if sig["signal"] == "sell":
+                    sell_count += 1
+        except Exception:
+            pass
+    if sell_count >= len(peers):
+        return False, f"sector peers ({', '.join(peers)}) all in SELL — possible sector selloff"
+    return True, f"peers ok ({sell_count}/{len(peers)} selling)"
+
+
+def _enrich_signal(symbol: str, sig: dict) -> dict:
+    """Add sentiment_trend, peer_consensus, macro_event_day to the signal dict."""
+    try:
+        sig["sentiment_trend"] = events.sentiment_trend(symbol)
+    except Exception:
+        sig["sentiment_trend"] = 0
+    sig["peer_consensus"] = True   # default; will be set after peer check
+    try:
+        sig["macro_event_day"] = events.is_high_impact_macro_day()
+    except Exception:
+        sig["macro_event_day"] = False
+    return sig
 
 
 def _smart_sleep() -> None:
@@ -185,40 +305,104 @@ def _check_sl_tp(position: dict) -> bool:
     peak = _peak_prices[symbol]
 
     # Trailing stop: trail from peak, not entry
-    trailing_stop_hit = config.STOP_LOSS_PCT > 0 and current_price <= peak * (1 - config.STOP_LOSS_PCT)
+    stop_pct = _position_stops.get(symbol, config.STOP_LOSS_PCT)
+    trailing_stop_hit = stop_pct > 0 and current_price <= peak * (1 - stop_pct)
     # pnl_pct still used for take-profit (measured from entry)
     pnl_pct = (current_price - avg_entry) / avg_entry if avg_entry > 0 else 0.0
+
+    # Exit review: if agent is enabled and holds remain, ask agent before closing
+    if trailing_stop_hit and config.EXIT_REVIEW_ENABLED and config.USE_AGENT:
+        holds = _exit_holds.get(symbol, 0)
+        if holds < config.MAX_EXIT_HOLDS:
+            try:
+                bars = broker.get_bars(symbol, timeframe="1Day", lookback_days=10)
+                review_sig = strategy.compute_signals(bars) if bars else {}
+                review_sig = _enrich_signal(symbol, review_sig)
+                review_sig["signal"] = "sell"   # context: we're reviewing an exit
+                result = agent.evaluate_signal(symbol, review_sig, use_cache=False)
+                if result["approved"]:
+                    # Agent says hold the position a bit longer
+                    _exit_holds[symbol] = holds + 1
+                    log.info(
+                        "%s: exit-review HOLD (%d/%d) — %s",
+                        symbol, holds + 1, config.MAX_EXIT_HOLDS, result["reason"],
+                    )
+                    return False   # skip stop this tick
+                else:
+                    _exit_holds[symbol] = 0
+            except Exception as exc:
+                log.debug("%s: exit review error — %s", symbol, exc)
+        else:
+            _exit_holds[symbol] = 0   # max holds exhausted, proceed with stop
+
+    # Partial scale-out: sell half at EXIT_REVIEW_TRIGGER_PCT × TP target
+    # e.g. TP=15%, trigger=0.5 → sell 50% at +7.5%, let rest run to full TP
+    partial_trigger = config.TAKE_PROFIT_PCT * config.EXIT_REVIEW_TRIGGER_PCT
+    if (
+        not _partial_done.get(symbol, False)
+        and config.TAKE_PROFIT_PCT > 0
+        and partial_trigger > 0
+        and pnl_pct >= partial_trigger
+        and side == "long"
+        and not config.SHADOW_MODE
+        and not config.DRY_RUN
+    ):
+        qty = float(position.get("qty", 0))
+        partial_qty = max(1.0, round(qty * 0.5, 0))
+        if partial_qty < qty:
+            log.info(
+                "%s: PARTIAL SCALE-OUT %.0f%% of TP hit (pnl=%.1f%%) — selling %s of %s shares",
+                symbol, config.EXIT_REVIEW_TRIGGER_PCT * 100, pnl_pct * 100, partial_qty, qty,
+            )
+            try:
+                broker.place_market_order(symbol, partial_qty, "sell")
+                _partial_done[symbol] = True
+                pnl_dollars = (current_price - avg_entry) * partial_qty
+                trade_journal.log_outcome(symbol, avg_entry, current_price, pnl_dollars, "partial_scale_out")
+                alerts.order_alert(symbol, "partial_sell", partial_qty, current_price, "")
+            except Exception as exc:
+                log.warning("%s: partial scale-out failed — %s", symbol, exc)
 
     if trailing_stop_hit:
         log.warning(
             "%s: TRAILING STOP hit (price=%.2f peak=%.2f trail=%.2f%%) - closing %s",
-            symbol, current_price, peak, config.STOP_LOSS_PCT * 100, side,
+            symbol, current_price, peak, stop_pct * 100, side,
         )
         _peak_prices.pop(symbol, None)
+        _partial_done.pop(symbol, None)
+        _position_stops.pop(symbol, None)
         if config.SHADOW_MODE:
             trade = shadow_book.close_position(symbol, float(position["current_price"]), reason="stop_loss")
             if trade:
                 log.info("SHADOW close %s via stop loss: pnl=$%.2f", symbol, trade["pnl"])
+                trade_journal.log_outcome(symbol, avg_entry, current_price, trade["pnl"], "stop_loss")
             return trade is not None
         if config.DRY_RUN:
             log.info("[DRY RUN] Would close %s at stop loss", symbol)
             return True
         result = broker.close_position(symbol)
+        pnl_dollars = (current_price - avg_entry) * float(position.get("qty", 0))
+        trade_journal.log_outcome(symbol, avg_entry, current_price, pnl_dollars, "stop_loss")
         alerts.order_alert(symbol, "close", position["qty"], position["current_price"], result.get("order_id", ""))
         return True
 
     if config.TAKE_PROFIT_PCT > 0 and pnl_pct >= config.TAKE_PROFIT_PCT:
         log.info("%s: TAKE PROFIT hit (%.2f%%) - closing %s", symbol, pnl_pct * 100, side)
         _peak_prices.pop(symbol, None)
+        _partial_done.pop(symbol, None)
+        _position_stops.pop(symbol, None)
         if config.SHADOW_MODE:
             trade = shadow_book.close_position(symbol, float(position["current_price"]), reason="take_profit")
             if trade:
                 log.info("SHADOW close %s via take profit: pnl=$%.2f", symbol, trade["pnl"])
+                trade_journal.log_outcome(symbol, avg_entry, current_price, trade["pnl"], "take_profit")
             return trade is not None
         if config.DRY_RUN:
             log.info("[DRY RUN] Would close %s at take profit", symbol)
             return True
         result = broker.close_position(symbol)
+        pnl_dollars = (current_price - avg_entry) * float(position.get("qty", 0))
+        trade_journal.log_outcome(symbol, avg_entry, current_price, pnl_dollars, "take_profit")
         alerts.order_alert(symbol, "close", position["qty"], position["current_price"], result.get("order_id", ""))
         return True
 
@@ -231,9 +415,23 @@ def _place_buy(symbol: str, sig: dict, account: dict, positions: list[dict], wat
         log.info("%s: pre-trade check failed - %s", symbol, reason)
         return False
 
-    approved, reason = agent.evaluate_signal(symbol, sig)
-    log.info("%s: agent=%s (%s)", symbol, "APPROVE" if approved else "REJECT", reason)
+    result = agent.evaluate_signal(symbol, sig)
+    approved = result["approved"]
+    reason   = result["reason"]
+    log.info(
+        "%s: agent=%s size=x%.1f stop=%s (%s)",
+        symbol,
+        "APPROVE" if approved else "REJECT",
+        result["size_multiplier"],
+        f"{result['suggested_stop_pct']*100:.1f}%" if result["suggested_stop_pct"] else "default",
+        reason,
+    )
     if not approved:
+        trade_journal.log_decision(
+            symbol, sig["signal"], False, reason,
+            score=sig.get("score", 0), sentiment=sig.get("sentiment_trend", 0),
+            macro_day=sig.get("macro_event_day", False),
+        )
         return False
 
     # Vol-targeting: pass realized_vol from signal for volatility-adjusted sizing
@@ -242,6 +440,14 @@ def _place_buy(symbol: str, sig: dict, account: dict, positions: list[dict], wat
         atr=sig.get("atr"),
         realized_vol=sig.get("regime_realized_vol"),
     )
+    # Apply agent-suggested size multiplier
+    qty = max(1.0, round(qty * result["size_multiplier"], 0))
+
+    # Apply agent-suggested dynamic stop for this position
+    if result["suggested_stop_pct"] and config.AGENT_DYNAMIC_STOPS:
+        _position_stops[symbol] = result["suggested_stop_pct"]
+        log.info("%s: dynamic stop set to %.1f%%", symbol, result["suggested_stop_pct"] * 100)
+
     if config.SHADOW_MODE:
         shadow_book.record_intent(symbol, "buy", qty, sig["price"], sig["reason"], sig["score"])
         shadow_book.open_position(symbol, "long", qty, sig["price"], sig["reason"], sig["score"])
@@ -255,6 +461,12 @@ def _place_buy(symbol: str, sig: dict, account: dict, positions: list[dict], wat
 
     order = broker.place_market_order(symbol, qty, "buy")
     risk.record_order(symbol)
+    trade_journal.log_decision(
+        symbol, sig["signal"], True, reason,
+        size_multiplier=result["size_multiplier"],
+        score=sig.get("score", 0), sentiment=sig.get("sentiment_trend", 0),
+        macro_day=sig.get("macro_event_day", False),
+    )
     alerts.order_alert(symbol, "buy", qty, sig["price"], order.get("id", ""))
     alerts.signal_alert(symbol, "buy", sig["score"], sig["price"], sig["reason"])
     log.info("BUY order placed: %s", order)
@@ -272,12 +484,31 @@ def _place_short(symbol: str, sig: dict, account: dict, positions: list[dict], w
         log.info("%s: short pre-trade check failed - %s", symbol, reason)
         return False
 
-    approved, reason = agent.evaluate_signal(symbol, sig)
-    log.info("%s: agent=%s (%s)", symbol, "APPROVE" if approved else "REJECT", reason)
+    result = agent.evaluate_signal(symbol, sig)
+    approved = result["approved"]
+    reason   = result["reason"]
+    log.info(
+        "%s: agent=%s size=x%.1f stop=%s (%s)",
+        symbol,
+        "APPROVE" if approved else "REJECT",
+        result["size_multiplier"],
+        f"{result['suggested_stop_pct']*100:.1f}%" if result["suggested_stop_pct"] else "default",
+        reason,
+    )
     if not approved:
+        trade_journal.log_decision(
+            symbol, sig["signal"], False, reason,
+            score=sig.get("score", 0), sentiment=sig.get("sentiment_trend", 0),
+            macro_day=sig.get("macro_event_day", False),
+        )
         return False
 
     qty = risk.compute_qty(sig["price"], account, atr=sig.get("atr"))
+    qty = max(1.0, round(qty * result["size_multiplier"], 0))
+    if result["suggested_stop_pct"] and config.AGENT_DYNAMIC_STOPS:
+        _position_stops[symbol] = result["suggested_stop_pct"]
+        log.info("%s: dynamic stop set to %.1f%%", symbol, result["suggested_stop_pct"] * 100)
+
     if config.SHADOW_MODE:
         shadow_book.record_intent(symbol, "short", qty, sig["price"], sig["reason"], sig["score"])
         shadow_book.open_position(symbol, "short", qty, sig["price"], sig["reason"], sig["score"])
@@ -291,6 +522,12 @@ def _place_short(symbol: str, sig: dict, account: dict, positions: list[dict], w
 
     order = broker.place_market_order(symbol, qty, "sell")
     risk.record_order(symbol)
+    trade_journal.log_decision(
+        symbol, sig["signal"], True, reason,
+        size_multiplier=result["size_multiplier"],
+        score=sig.get("score", 0), sentiment=sig.get("sentiment_trend", 0),
+        macro_day=sig.get("macro_event_day", False),
+    )
     alerts.order_alert(symbol, "short", qty, sig["price"], order.get("id", ""))
     alerts.signal_alert(symbol, "sell", sig["score"], sig["price"], sig["reason"])
     log.info("SHORT order placed: %s", order)
@@ -306,7 +543,9 @@ def _close_long(symbol: str, sig: dict, positions: list[dict], watchlist: list[s
     if watchlist and not risk.is_watchlist_allowed(symbol, watchlist):
         return False
 
-    approved, reason = agent.evaluate_signal(symbol, sig)
+    _cl_result = agent.evaluate_signal(symbol, sig)
+    approved = _cl_result["approved"]
+    reason   = _cl_result["reason"]
     log.info("%s: agent=%s (%s)", symbol, "APPROVE" if approved else "REJECT", reason)
     if not approved:
         return False
@@ -315,6 +554,7 @@ def _close_long(symbol: str, sig: dict, positions: list[dict], watchlist: list[s
         trade = shadow_book.close_position(symbol, sig["price"], reason="sell_signal")
         if trade:
             log.info("SHADOW LONG closed %s: pnl=$%.2f", symbol, trade["pnl"])
+            trade_journal.log_outcome(symbol, float(pos["avg_entry"]), sig["price"], trade["pnl"], "sell_signal")
             return True
         return False
 
@@ -323,7 +563,11 @@ def _close_long(symbol: str, sig: dict, positions: list[dict], watchlist: list[s
         return True
 
     _peak_prices.pop(symbol, None)
+    _partial_done.pop(symbol, None)
+    _position_stops.pop(symbol, None)
     result = broker.close_position(symbol)
+    pnl_dollars = (sig["price"] - float(pos["avg_entry"])) * float(pos["qty"])
+    trade_journal.log_outcome(symbol, float(pos["avg_entry"]), sig["price"], pnl_dollars, "sell_signal")
     alerts.order_alert(symbol, "sell", pos["qty"], pos["current_price"], result.get("order_id", ""))
     alerts.signal_alert(symbol, "sell", sig["score"], sig["price"], sig["reason"])
     log.info("Long position closed: %s", result)
@@ -337,7 +581,9 @@ def _close_short(symbol: str, sig: dict, positions: list[dict]) -> bool:
     if not pos:
         return False
 
-    approved, reason = agent.evaluate_signal(symbol, sig)
+    _cs_result = agent.evaluate_signal(symbol, sig)
+    approved = _cs_result["approved"]
+    reason   = _cs_result["reason"]
     log.info("%s: agent=%s (%s)", symbol, "APPROVE" if approved else "REJECT", reason)
     if not approved:
         return False
@@ -346,6 +592,7 @@ def _close_short(symbol: str, sig: dict, positions: list[dict]) -> bool:
         trade = shadow_book.close_position(symbol, sig["price"], reason="cover_signal")
         if trade:
             log.info("SHADOW SHORT covered %s: pnl=$%.2f", symbol, trade["pnl"])
+            trade_journal.log_outcome(symbol, float(pos["avg_entry"]), sig["price"], trade["pnl"], "cover_signal")
             return True
         return False
 
@@ -353,7 +600,10 @@ def _close_short(symbol: str, sig: dict, positions: list[dict]) -> bool:
         log.info("[DRY RUN] Would COVER SHORT %s", symbol)
         return True
 
+    _position_stops.pop(symbol, None)
     result = broker.close_position(symbol)
+    pnl_dollars = (float(pos["avg_entry"]) - sig["price"]) * float(pos["qty"])
+    trade_journal.log_outcome(symbol, float(pos["avg_entry"]), sig["price"], pnl_dollars, "cover_signal")
     alerts.order_alert(symbol, "cover", pos["qty"], pos["current_price"], result.get("order_id", ""))
     log.info("Short covered: %s", result)
     return True
@@ -381,7 +631,12 @@ def _maybe_run_events(symbol: str, sig: dict) -> dict:
 
 
 def _process_symbol(symbol: str, watchlist: list[str], market_trend: int = 0) -> None:
-    account = broker.get_account()
+    # Curation blacklist — skip if flagged at day start
+    if symbol in _curated_blacklist:
+        log.info("%s: skipped (curated blacklist — negative news today)", symbol)
+        return
+
+    account   = broker.get_account()
     positions = _current_positions()
     pos = next((p for p in positions if p["symbol"] == symbol), None)
     if pos and _check_sl_tp(pos):
@@ -391,17 +646,51 @@ def _process_symbol(symbol: str, watchlist: list[str], market_trend: int = 0) ->
     earnings_soon = events.is_earnings_period(symbol) if config.USE_AGENT else False
     if earnings_soon:
         log.info("%s: earnings period detected - buy suppressed", symbol)
+
     sig = strategy.compute_signals(bars, market_trend=market_trend, earnings_soon=earnings_soon)
     sig = _maybe_run_events(symbol, sig)
+
+    if sig["signal"] in ("buy", "sell"):
+        # Enrich with news sentiment + macro context before agent sees it
+        sig = _enrich_signal(symbol, sig)
+
+        # Time-of-day filter
+        tod_ok, tod_reason = risk.check_time_of_day()
+        if not tod_ok and sig["signal"] == "buy":
+            log.info("%s: buy blocked — %s", symbol, tod_reason)
+            sig["signal"] = "hold"
+
+        # Gap filter
+        gap_ok, gap_reason = risk.check_gap(bars)
+        if not gap_ok and sig["signal"] == "buy":
+            log.info("%s: buy blocked — %s", symbol, gap_reason)
+            sig["signal"] = "hold"
+
+        # Multi-timeframe confluence
+        if sig["signal"] in ("buy", "sell"):
+            tf_ok, tf_reason = _check_higher_tf(symbol, sig["signal"], market_trend)
+            if not tf_ok:
+                log.info("%s: blocked — %s", symbol, tf_reason)
+                sig["signal"] = "hold"
+
+        # Peer check (buy only — don't block sells)
+        if sig["signal"] == "buy":
+            peer_ok, peer_reason = _check_peers(symbol, market_trend)
+            sig["peer_consensus"] = peer_ok
+            if not peer_ok:
+                log.info("%s: buy blocked — %s", symbol, peer_reason)
+                sig["signal"] = "hold"
+
     if config.SHADOW_MODE and sig.get("price"):
         shadow_book.update_mark(symbol, sig["price"])
 
     log.info(
-        "%s: regime=%s mkt_trend=%s adx=%.1f signal=%s score=%s reason=%s",
+        "%s: regime=%s mkt=%s adx=%.1f sentiment=%+d signal=%s score=%s reason=%s",
         symbol,
         sig.get("regime", "n/a"),
         "bull" if market_trend == 1 else ("bear" if market_trend == -1 else "?"),
         sig.get("adx") or 0.0,
+        sig.get("sentiment_trend", 0),
         sig["signal"],
         sig["score"],
         sig["reason"],
@@ -410,21 +699,39 @@ def _process_symbol(symbol: str, watchlist: list[str], market_trend: int = 0) ->
     if sig["signal"] == "buy":
         changed = _close_short(symbol, sig, positions)
         if changed:
-            account = broker.get_account()
+            account   = broker.get_account()
             positions = _current_positions()
         _place_buy(symbol, sig, account, positions, watchlist)
 
     elif sig["signal"] == "sell":
         changed = _close_long(symbol, sig, positions, watchlist)
         if changed:
-            account = broker.get_account()
+            account   = broker.get_account()
             positions = _current_positions()
         _place_short(symbol, sig, account, positions, watchlist)
 
 
 def get_active_watchlist() -> list[str]:
+    """
+    Return the live trading watchlist.
+    When WATCHLIST_SOURCE != "static", symbols are fetched dynamically each tick
+    (most_active, gainers, trending, sector, etf) and merged with any manually
+    stored symbols so user-pinned tickers are always included.
+    """
     stored = watchlist_store.load()
-    return list(dict.fromkeys(config.WATCHLIST + stored))
+    source = config.WATCHLIST_SOURCE
+    if source == "static":
+        return list(dict.fromkeys(config.WATCHLIST + stored))
+    try:
+        dynamic = screener.build_watchlist(
+            source,
+            top_n=config.WATCHLIST_TOP_N,
+            sectors=config.WATCHLIST_SECTORS or None,
+        )
+    except Exception as exc:
+        log.warning("Dynamic watchlist fetch failed (%s), falling back to static: %s", source, exc)
+        dynamic = config.WATCHLIST
+    return list(dict.fromkeys(dynamic + stored))
 
 
 def run_once() -> None:
@@ -456,15 +763,29 @@ def run_once() -> None:
     elif config.DRY_RUN:
         log.info("[DRY RUN] No orders will be placed.")
 
+    # Daily curation — keyword-scan for bad-news tickers at day start
+    _curate_watchlist(watchlist)
+
+    # Macro suppression — reduce entries on high-impact economic event days
+    macro_day = events.is_high_impact_macro_day()
+    if macro_day:
+        log.warning("HIGH IMPACT MACRO DAY detected — only high-conviction signals will trade")
+
     # Fetch SPY market trend once per tick — shared across all symbols
     market_trend = _get_market_trend()
     log.info("Market trend (SPY vs EMA200): %s", "BULL" if market_trend == 1 else ("BEAR" if market_trend == -1 else "UNKNOWN"))
 
-    for symbol in watchlist:
-        try:
-            _process_symbol(symbol, watchlist, market_trend=market_trend)
-        except Exception as exc:
-            log.error("%s: error during tick - %s", symbol, exc, exc_info=True)
+    _orig_threshold = config.SIGNAL_THRESHOLD
+    if macro_day:
+        config.SIGNAL_THRESHOLD = max(config.SIGNAL_THRESHOLD, config.SIGNAL_THRESHOLD + 1)
+    try:
+        for symbol in watchlist:
+            try:
+                _process_symbol(symbol, watchlist, market_trend=market_trend)
+            except Exception as exc:
+                log.error("%s: error during tick - %s", symbol, exc, exc_info=True)
+    finally:
+        config.SIGNAL_THRESHOLD = _orig_threshold
 
     log.info("=== Tick end ===\n")
 

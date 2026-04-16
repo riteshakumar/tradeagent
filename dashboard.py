@@ -14,6 +14,7 @@ import backtest
 import watchlist_store
 import settings_store
 import shadow_book
+import trade_journal
 from main import get_active_watchlist
 
 st.set_page_config(page_title="TradeAgent", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
@@ -264,10 +265,12 @@ def event_card(label, score, confidence, reason):
         <div style="color:#cbd5e1;font-size:0.83rem;margin-top:6px;line-height:1.4">{reason}</div>
     </div>""", unsafe_allow_html=True)
 
+_P = 'padding:8px 14px;vertical-align:middle'  # shared td padding
+
 _SIGNAL_BADGES = {
-    "BUY":  '<td><span style="background:#052e16;color:#34d399;border:1px solid #059669;padding:2px 12px;border-radius:20px;font-size:0.75rem;font-weight:700">▲ BUY</span></td>',
-    "SELL": '<td><span style="background:#2d0a0a;color:#f87171;border:1px solid #dc2626;padding:2px 12px;border-radius:20px;font-size:0.75rem;font-weight:700">▼ SELL</span></td>',
-    "HOLD": '<td><span style="background:#1e293b;color:#94a3b8;border:1px solid #334155;padding:2px 12px;border-radius:20px;font-size:0.75rem;font-weight:700">● HOLD</span></td>',
+    "BUY":  f'<td style="{_P};white-space:nowrap"><span style="background:#052e16;color:#34d399;border:1px solid #059669;padding:2px 12px;border-radius:20px;font-size:0.75rem;font-weight:700">▲ BUY</span></td>',
+    "SELL": f'<td style="{_P};white-space:nowrap"><span style="background:#2d0a0a;color:#f87171;border:1px solid #dc2626;padding:2px 12px;border-radius:20px;font-size:0.75rem;font-weight:700">▼ SELL</span></td>',
+    "HOLD": f'<td style="{_P};white-space:nowrap"><span style="background:#1e293b;color:#94a3b8;border:1px solid #334155;padding:2px 12px;border-radius:20px;font-size:0.75rem;font-weight:700">● HOLD</span></td>',
 }
 _STATUS_COLORS = {"FILLED":"#34d399","CANCELED":"#f87171","PENDING_NEW":"#f59e0b","NEW":"#f59e0b","PARTIALLY_FILLED":"#a5b4fc","REJECTED":"#f87171"}
 
@@ -277,76 +280,115 @@ def _cell_score(v):
         if n > 0:   color, prefix = "#34d399", "+"
         elif n < 0: color, prefix = "#f87171", ""
         else:       color, prefix = "#64748b", ""
-        return f'<td style="color:{color};font-weight:700;text-align:center">{prefix}{int(n)}</td>'
+        return f'<td style="{_P};color:{color};font-weight:700;text-align:center;white-space:nowrap">{prefix}{int(n)}</td>'
     except Exception:
-        return f'<td>{v}</td>'
+        return f'<td style="{_P}">{v}</td>'
 
 def _cell_pnl(v):
     s = str(v)
     color = "#34d399" if not s.startswith("-") else "#f87171"
-    return f'<td style="color:{color};font-weight:600;font-family:monospace">{s}</td>'
+    return f'<td style="{_P};color:{color};font-weight:600;font-family:monospace;white-space:nowrap">{s}</td>'
 
 def _cell_rsi(v):
     try:
         n = float(v)
-        if n > 65:
-            color = "#f87171"
-        elif n < 35:
-            color = "#34d399"
-        else:
-            color = "#e2e8f0"
-        return f'<td style="color:{color}">{v}</td>'
+        color = "#f87171" if n > 65 else ("#34d399" if n < 35 else "#e2e8f0")
+        return f'<td style="{_P};color:{color};white-space:nowrap">{v}</td>'
     except Exception:
-        return f'<td>{v}</td>'
+        return f'<td style="{_P}">{v}</td>'
 
 def _cell_pct(v):
     try:
         n = float(v)
         color = "#34d399" if n >= 0 else "#f87171"
         arrow = "▲" if n >= 0 else "▼"
-        return f'<td style="color:{color};font-weight:600">{arrow} {abs(n):.2f}%</td>'
+        return f'<td style="{_P};color:{color};font-weight:600;white-space:nowrap">{arrow} {abs(n):.2f}%</td>'
     except Exception:
-        return f'<td>{v}</td>'
+        return f'<td style="{_P}">{v}</td>'
+
+def _cell_text(s: str, color: str = "#94a3b8", width: str = "240px") -> str:
+    """
+    Single-line truncated text cell.
+    max-width on <td> is ignored by browsers — the constraint must be on an
+    inner block element (div). Full text shown via title tooltip on hover.
+    """
+    safe = s.replace('"', "&quot;").replace("'", "&#39;")
+    return (
+        f'<td style="{_P}">'
+        f'<div style="color:{color};font-size:0.8rem;white-space:nowrap;'
+        f'overflow:hidden;text-overflow:ellipsis;max-width:{width}" title="{safe}">'
+        f'{s}</div></td>'
+    )
 
 _CELL_DISPATCH = {
-    "Signal":   lambda v,s: _SIGNAL_BADGES.get(s, f'<td style="color:#f87171">{s}</td>'),
+    "Signal":   lambda v,s: _SIGNAL_BADGES.get(s, f'<td style="{_P};color:#f87171">{s}</td>'),
     "Score":    lambda v,s: _cell_score(v),
-    "side":     lambda v,s: f'<td><span style="color:{"#34d399" if s.upper() in ("BUY","LONG") else "#f87171"};font-weight:700">{s}</span></td>',
-    "status":   lambda v,s: f'<td style="color:{_STATUS_COLORS.get(s.upper(),"#94a3b8")};font-weight:600;font-size:0.8rem">{s}</td>',
-    "Symbol":   lambda v,s: f'<td style="color:#a5b4fc;font-weight:700;letter-spacing:0.04em">{s}</td>',
-    "symbol":   lambda v,s: f'<td style="color:#a5b4fc;font-weight:700;letter-spacing:0.04em">{s}</td>',
-    "RSI":      lambda v,s: _cell_rsi(v),
-    "Reason":   lambda v,s: f'<td style="color:#94a3b8;font-size:0.8rem;white-space:normal;word-break:break-word;min-width:180px;max-width:360px" title="{s}">{s}</td>',
-    "reason":   lambda v,s: f'<td style="color:#94a3b8;font-size:0.8rem;white-space:normal;word-break:break-word;min-width:180px;max-width:360px" title="{s}">{s}</td>',
-    "change_pct": lambda v,s: _cell_pct(v),
-    "pnl":      lambda v,s: _cell_pnl(v),
-    "pnl_pct":  lambda v,s: _cell_pct(v),
+    "side":     lambda v,s: f'<td style="{_P}"><span style="color:{"#34d399" if s.upper() in ("BUY","LONG") else "#f87171"};font-weight:700">{s}</span></td>',
+    "status":   lambda v,s: f'<td style="{_P};color:{_STATUS_COLORS.get(s.upper(),"#94a3b8")};font-weight:600;font-size:0.8rem">{s}</td>',
+    "Symbol":   lambda v,s: f'<td style="{_P};color:#a5b4fc;font-weight:700;letter-spacing:0.04em;white-space:nowrap">{s}</td>',
+    "symbol":   lambda v,s: f'<td style="{_P};color:#a5b4fc;font-weight:700;letter-spacing:0.04em;white-space:nowrap">{s}</td>',
+    "RSI":         lambda v,s: _cell_rsi(v),
+    "Reason":      lambda v,s: _cell_text(s, "#94a3b8", "260px"),
+    "reason":      lambda v,s: _cell_text(s, "#94a3b8", "260px"),
+    "exit_reason": lambda v,s: _cell_text(s, "#64748b", "140px"),
+    "Headline":    lambda v,s: _cell_text(s, "#cbd5e1", "340px"),
+    "change_pct":  lambda v,s: _cell_pct(v),
+    "pnl":         lambda v,s: _cell_pnl(v),
+    "pnl_pct":     lambda v,s: _cell_pct(v),
     "unrealized_pnl":     lambda v,s: _cell_pnl(v),
     "unrealized_pnl_pct": lambda v,s: _cell_pnl(v),
-    "time":     lambda v,s: f'<td style="color:#64748b;font-size:0.8rem;font-family:monospace">{s}</td>',
-    "ATR":          lambda _,s: f'<td style="color:#64748b;font-size:0.8rem;font-family:monospace">{s}</td>',
-    "Volume":       lambda _,s: f'<td style="color:#94a3b8;font-family:monospace;font-size:0.85rem">{s}</td>',
-    "Trade Count":  lambda _,s: f'<td style="color:#94a3b8;font-family:monospace;font-size:0.85rem">{s}</td>',
-    "Agent":    lambda v,s: f'<td style="text-align:center" title="{s}"><span style="cursor:help;font-size:1rem">🤖</span></td>' if s not in ("—","") else '<td style="color:#334155;text-align:center">—</td>',
-    "Headline": lambda v,s: f'<td style="color:#cbd5e1;font-size:0.82rem;white-space:normal;word-break:break-word;max-width:480px">{s}</td>',
-    **{k: (lambda v,s: f'<td style="color:#e2e8f0;font-family:monospace">{s}</td>')
+    "time":        lambda v,s: f'<td style="{_P};color:#64748b;font-size:0.8rem;font-family:monospace;white-space:nowrap">{s}</td>',
+    "ATR":         lambda _,s: f'<td style="{_P};color:#64748b;font-size:0.8rem;font-family:monospace;white-space:nowrap">{s}</td>',
+    "Volume":      lambda _,s: f'<td style="{_P};color:#94a3b8;font-family:monospace;font-size:0.85rem;white-space:nowrap">{s}</td>',
+    "Trade Count": lambda _,s: f'<td style="{_P};color:#94a3b8;font-family:monospace;font-size:0.85rem;white-space:nowrap">{s}</td>',
+    "Agent": lambda v,s: (
+        f'<td style="{_P};text-align:center;white-space:nowrap" title="{s}">'
+        f'<span style="font-size:0.75rem;font-weight:700;'
+        f'color:{"#34d399" if "approve" in s.lower() else "#f87171"};'
+        f'background:{"#052e16" if "approve" in s.lower() else "#2d0a0a"};'
+        f'border:1px solid {"#059669" if "approve" in s.lower() else "#dc2626"};'
+        f'padding:1px 8px;border-radius:20px">'
+        f'{"✓ OK" if "approve" in s.lower() else "✗ No"}</span></td>'
+        if s not in ("—", "")
+        else f'<td style="{_P};color:#334155;text-align:center;font-size:0.78rem">—</td>'
+    ),
+    **{k: (lambda v,s: f'<td style="{_P};color:#e2e8f0;font-family:monospace;white-space:nowrap">{s}</td>')
        for k in ["Price","price","avg_entry","current_price","filled_avg","value","entry","exit"]},
 }
 
 def html_table(rows, max_height=420):
     if not rows: return
     cols = list(rows[0].keys())
-    header = "".join(f'<th style="color:#64748b;font-size:0.68rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:10px 14px;border-bottom:1px solid #1e293b;white-space:nowrap">{c}</th>' for c in cols)
+    header = "".join(
+        f'<th style="color:#64748b;font-size:0.68rem;font-weight:700;letter-spacing:0.1em;'
+        f'text-transform:uppercase;padding:10px 14px;border-bottom:1px solid #1e293b;'
+        f'white-space:nowrap;position:sticky;top:0;background:#0a0f1e;z-index:2">{c}</th>'
+        for c in cols
+    )
     body = ""
     for i, row in enumerate(rows):
         bg = "#0d1424" if i % 2 == 0 else "#0f172b"
-        cells = "".join((_CELL_DISPATCH.get(c, lambda v,s: f'<td style="color:#cbd5e1">{s}</td>')(row[c], str(row[c])) for c in cols))
-        body += f'<tr style="background:{bg}" onmouseover="this.style.background=\'#1e293b\'" onmouseout="this.style.background=\'{bg}\'">{cells}</tr>'
+        cells = "".join(
+            _CELL_DISPATCH.get(
+                c,
+                lambda v, s: f'<td style="{_P};color:#cbd5e1;white-space:nowrap">{s}</td>'
+            )(row[c], str(row[c]))
+            for c in cols
+        )
+        body += (
+            f'<tr style="background:{bg}" '
+            f'onmouseover="this.style.background=\'#1e293b\'" '
+            f'onmouseout="this.style.background=\'{bg}\'">{cells}</tr>'
+        )
     _height_style = f"max-height:{int(max_height)}px;" if max_height else ""
+    # Use a scoped style block — `max-width` on inner divs (not td) is what
+    # actually constrains text columns in browsers.
     st.markdown(
-        f'<div style="border:1px solid #1e293b;border-radius:10px;overflow:auto;{_height_style}margin-bottom:8px">'
-        f'<table style="width:100%;border-collapse:collapse;font-size:0.85rem"><thead style="position:sticky;top:0;z-index:1">'
-        f'<tr style="background:#0a0f1e">{header}</tr></thead><tbody>{body}</tbody></table></div>',
+        f'<div style="border:1px solid #1e293b;border-radius:10px;overflow:auto;'
+        f'{_height_style}margin-bottom:8px">'
+        f'<table style="border-collapse:collapse;font-size:0.85rem;white-space:nowrap;width:100%">'
+        f'<thead><tr style="background:#0a0f1e">{header}</tr></thead>'
+        f'<tbody>{body}</tbody></table></div>',
         unsafe_allow_html=True,
     )
 
@@ -372,7 +414,30 @@ provider = config.AGENT_PROVIDER.upper() if config.USE_AGENT else "NONE"
 provider_label = {"CLAUDE":"Claude","OPENAI":"OpenAI","NONE":"No LLM"}.get(provider, provider)
 
 
-def build_signal_snapshot(watchlist, bar_timeframe):
+@st.cache_data(ttl=120)
+def _fetch_trending_tape(top_n: int = 20) -> list[dict]:
+    """
+    Fetch live trending tickers for the header tape.
+    Returns list of {sym, price, chg_pct} dicts, cached 2 min.
+    """
+    try:
+        symbols = screener.trending(top_n)
+    except Exception:
+        symbols = []
+    items = []
+    for sym in symbols:
+        try:
+            bars = broker.get_bars(sym, timeframe="1Day", lookback_days=3)
+            if len(bars) >= 2:
+                prev, last = float(bars[-2]["c"]), float(bars[-1]["c"])
+                chg = (last - prev) / prev * 100
+                items.append({"sym": sym, "price": last, "chg": chg})
+        except Exception:
+            pass
+    return items
+
+
+def build_signal_snapshot(watchlist, bar_timeframe, run_agent: bool = False):
     signal_cache = {}
     signal_rows = []
     with st.spinner("Computing signals..."):
@@ -381,6 +446,15 @@ def build_signal_snapshot(watchlist, bar_timeframe):
                 bars = broker.get_bars(symbol, timeframe=bar_timeframe)
                 sig = strategy.compute_signals(bars)
                 signal_cache[symbol] = sig
+
+                agent_val = "—"
+                if run_agent and config.USE_AGENT and sig["signal"] != "hold":
+                    try:
+                        _res = agent.evaluate_signal(symbol, sig)
+                        agent_val = f"approved:{_res['reason'][:40]}" if _res["approved"] else f"rejected:{_res['reason'][:40]}"
+                    except Exception:
+                        agent_val = "—"
+
                 signal_rows.append({
                     "Symbol": symbol,
                     "Price": f"${sig['price']:,.2f}" if sig["price"] else "—",
@@ -390,7 +464,7 @@ def build_signal_snapshot(watchlist, bar_timeframe):
                     "RSI": sig["rsi"] if sig["rsi"] else "—",
                     "ATR": f"{sig['atr']:.3f}" if sig.get("atr") else "—",
                     "Reason": sig["reason"],
-                    "Agent": "—",
+                    **({"Agent": agent_val} if run_agent else {}),
                 })
             except Exception as e:
                 signal_rows.append({
@@ -402,7 +476,7 @@ def build_signal_snapshot(watchlist, bar_timeframe):
                     "RSI": "—",
                     "ATR": "—",
                     "Reason": str(e),
-                    "Agent": "—",
+                    **({"Agent": "—"} if run_agent else {}),
                 })
     return signal_cache, signal_rows
 
@@ -459,13 +533,15 @@ def render_control_deck():
             st.markdown("**Watchlist Source**")
             watch_source = st.selectbox(
                 "",
-                ["my_list", "most_active", "gainers", "losers", "etf"],
+                ["my_list", "trending", "most_active", "gainers", "losers", "sector", "etf"],
                 format_func=lambda x: {
-                    "my_list": "My List",
+                    "my_list":     "My List",
+                    "trending":    "🔥 Trending Now",
                     "most_active": "Most Active",
-                    "gainers": "Top Gainers",
-                    "losers": "Top Losers",
-                    "etf": "ETF Themes",
+                    "gainers":     "Top Gainers",
+                    "losers":      "Top Losers",
+                    "sector":      "Sector + ETF",
+                    "etf":         "ETF Themes",
                 }[x],
                 label_visibility="collapsed",
             )
@@ -495,6 +571,18 @@ def render_control_deck():
             elif watch_source == "etf":
                 etf_themes = st.multiselect("Themes", options=list(screener.ETF_UNIVERSE.keys()), default=["Broad Market", "Tech"])
                 watchlist = screener.build_watchlist(watch_source, etf_themes=etf_themes or None)
+            elif watch_source == "sector":
+                _all_sectors = sorted(screener.SECTOR_UNIVERSE.keys())
+                _sel_sectors = st.multiselect(
+                    "Sectors",
+                    options=_all_sectors,
+                    default=["Tech", "Finance", "Broad Market"],
+                    key="sector_pick",
+                )
+                watchlist = screener.build_watchlist("sector", sectors=_sel_sectors or None)
+            elif watch_source == "trending":
+                top_n = st.slider("Top N", 5, 30, 15)
+                watchlist = screener.build_watchlist("trending", top_n=top_n)
             else:
                 top_n = st.slider("Top N", 5, 25, 10)
                 watchlist = screener.build_watchlist(watch_source, top_n=top_n)
@@ -655,7 +743,7 @@ _run_color = "#34d399" if _loop_running else "#64748b"
 _run_label = "● Running" if _loop_running else "○ Stopped"
 
 st.markdown(f"""
-<div style="display:flex;align-items:center;gap:16px;margin-bottom:6px;padding-bottom:16px;border-bottom:1px solid #1e293b">
+<div style="display:flex;align-items:center;gap:16px;margin-bottom:6px;padding-bottom:12px;border-bottom:1px solid #1e293b">
   <div style="
       width:48px;height:48px;border-radius:14px;flex-shrink:0;
       background:linear-gradient(135deg,#4f46e5 0%,#06b6d4 100%);
@@ -691,6 +779,23 @@ st.markdown(f"""
   </div>
 </div>
 """, unsafe_allow_html=True)
+
+# ── Trending ticker tape (always live, independent of watchlist selection) ──────
+_tape_items = _fetch_trending_tape(20)
+if _tape_items:
+    _tape_html = "".join(
+        f'<span class="ticker-item">'
+        f'<span class="ticker-sym">{t["sym"]}</span>'
+        f'<span class="ticker-price">${t["price"]:,.2f}</span>'
+        f'<span class="{"ticker-up" if t["chg"] >= 0 else "ticker-down"}">'
+        f'{"▲" if t["chg"] >= 0 else "▼"}{abs(t["chg"]):.2f}%</span>'
+        f'</span>'
+        for t in _tape_items
+    )
+    st.markdown(
+        f'<div class="ticker-wrap"><div class="ticker-track">{_tape_html * 2}</div></div>',
+        unsafe_allow_html=True,
+    )
 
 control_state = render_control_deck()
 auto_refresh = control_state["auto_refresh"]
@@ -817,13 +922,9 @@ except Exception:
     _live_fig = None
     pass
 
-# ── Ticker tape ────────────────────────────────────────────────────────────────
-with st.spinner(""):
-    ticker_tape(watchlist[:12])
-
 # ── Workspace ──────────────────────────────────────────────────────────────────
 section("Workspace", "#615fff")
-_panel_options = ["Overview", "Charts", "Positions", "Orders", "Events", "Backtest", "Watchlist", "Alerts", "Log"]
+_panel_options = ["Overview", "Charts", "Positions", "Orders", "Events", "Backtest", "Watchlist", "Alerts", "Journal", "Log"]
 _saved_panel = settings_store.get("dashboard_panel", "Overview")
 if _saved_panel not in _panel_options:
     _saved_panel = "Overview"
@@ -844,7 +945,16 @@ def render_overview_panel():
         return
 
     render_screener_snapshot(watch_source, top_n)
-    signal_cache, signal_rows = build_signal_snapshot(watchlist, bar_timeframe)
+    _ov_left, _ov_right = st.columns([3, 1])
+    with _ov_right:
+        run_agent_scan = st.toggle(
+            f"Agent scan ({provider_label})",
+            value=False,
+            key="ov_agent_scan",
+            help="Run LLM approval check on every BUY/SELL signal. Slower but fills the Agent column.",
+            disabled=not config.USE_AGENT,
+        )
+    signal_cache, signal_rows = build_signal_snapshot(watchlist, bar_timeframe, run_agent=run_agent_scan)
     if not signal_rows:
         alert("neutral", "No symbols in watchlist.")
         return
@@ -906,7 +1016,8 @@ def render_overview_panel():
             with _agent_col1:
                 if _ask_agent:
                     with st.spinner(f"{provider_label} analysing {detail_sym}..."):
-                        _approved, _reason = agent.evaluate_signal(detail_sym, _sig)
+                        _ar = agent.evaluate_signal(detail_sym, _sig)
+                        _approved, _reason = _ar["approved"], _ar["reason"]
                     if _approved:
                         alert("success", f"Approved: {_reason}")
                     else:
@@ -1273,6 +1384,82 @@ ALERT_TELEGRAM_CHAT_ID=your_chat_id""", language="bash")
             alert("danger", f"Alert failed: {e}")
 
 
+def render_journal_panel():
+    section("Trade Journal", "#a78bfa")
+    try:
+        stats = trade_journal.get_stats()
+        if stats.get("total_decisions", 0) == 0:
+            alert("neutral", "No journal entries yet — run main.py to start recording decisions.")
+            return
+
+        # ── Summary metrics ────────────────────────────────────────────────────
+        j1, j2, j3, j4, j5 = st.columns(5)
+        j1.metric("Total Decisions", stats["total_decisions"])
+        j2.metric("Approved", stats["approved"])
+        j3.metric("Rejected", stats["rejected"])
+        j4.metric("Approval Rate", f"{stats['approval_rate']*100:.0f}%")
+        win_rate_val = stats.get("win_rate", 0)
+        j5.metric(
+            "Win Rate",
+            f"{win_rate_val*100:.0f}%" if stats.get("total_outcomes", 0) > 0 else "—",
+            help="Closed trades only — needs log_outcome entries",
+        )
+
+        # ── Recent decisions ───────────────────────────────────────────────────
+        import json, os
+        _jfile = os.path.join(os.path.dirname(__file__), "trade_journal.json") if False else "trade_journal.json"
+        try:
+            with open(_jfile) as _f:
+                _records = json.load(_f)
+        except Exception:
+            _records = []
+
+        decisions = [r for r in _records if r.get("type") == "decision"]
+        outcomes  = [r for r in _records if r.get("type") == "outcome"]
+
+        if decisions:
+            section("Recent Decisions", "#64748b")
+            dec_rows = []
+            for d in reversed(decisions[-50:]):
+                dec_rows.append({
+                    "Time":     d.get("time", "")[:16].replace("T", " "),
+                    "Symbol":   d.get("symbol", ""),
+                    "Action":   d.get("action", "").upper(),
+                    "Decision": "APPROVE" if d.get("approved") else "REJECT",
+                    "Score":    d.get("score", 0),
+                    "Sentiment":f"{d.get('sentiment', 0):+d}",
+                    "Size":     f"x{d.get('size_multiplier', 1.0):.1f}",
+                    "Macro":    "YES" if d.get("macro_day") else "—",
+                    "Reason":   d.get("reason", ""),
+                })
+            html_table(dec_rows, max_height=380)
+
+        if outcomes:
+            section("Closed Trades (Outcomes)", "#64748b")
+            out_rows = []
+            total_pnl = 0.0
+            for o in reversed(outcomes[-50:]):
+                pnl = float(o.get("pnl", 0))
+                total_pnl += pnl
+                out_rows.append({
+                    "Time":       o.get("time", "")[:16].replace("T", " "),
+                    "Symbol":     o.get("symbol", ""),
+                    "Entry":      f"${float(o.get('entry_price', 0)):,.2f}",
+                    "Exit":       f"${float(o.get('exit_price', 0)):,.2f}",
+                    "P&L":        f"${pnl:+,.2f}",
+                    "Exit Reason": o.get("exit_reason", ""),
+                })
+            _oc1, _oc2 = st.columns(2)
+            _oc1.metric("Total Closed P&L", f"${total_pnl:+,.2f}")
+            _oc2.metric("Trades Logged", len(outcomes))
+            html_table(out_rows, max_height=340)
+        elif decisions:
+            alert("neutral", "No closed-trade outcomes yet — will appear after first stop-loss or take-profit.")
+
+    except Exception as _je:
+        st.error(f"Journal error: {_je}")
+
+
 def render_log_panel():
     section("Trade Log", "#64748b")
     try:
@@ -1322,6 +1509,8 @@ elif active_panel == "Watchlist":
     render_watchlist_panel()
 elif active_panel == "Alerts":
     render_alerts_panel()
+elif active_panel == "Journal":
+    render_journal_panel()
 elif active_panel == "Log":
     render_log_panel()
 

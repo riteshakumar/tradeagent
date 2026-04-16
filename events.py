@@ -250,6 +250,72 @@ def is_earnings_period(symbol: str, pre_days: int = 5, post_days: int = 2) -> bo
         return False  # Fail-open: don't block trading on API errors
 
 
+# ── Keyword sets for fast (no-LLM) sentiment scoring ──────────────────────────
+_POS_KW = frozenset([
+    "beat", "beats", "upgrade", "upgraded", "outperform", "record", "strong",
+    "growth", "surge", "surges", "gain", "gains", "rally", "buyback", "dividend",
+    "raised", "raises", "bullish", "profit", "revenue", "wins", "approved",
+    "partnership", "launch", "launched", "acquisition",
+])
+_NEG_KW = frozenset([
+    "miss", "misses", "downgrade", "downgraded", "underperform", "recall",
+    "fraud", "lawsuit", "lawsuits", "resign", "resigned", "layoff", "layoffs",
+    "loss", "losses", "decline", "declines", "weak", "warning", "cut", "cuts",
+    "bearish", "debt", "investigation", "fine", "penalty", "delay", "canceled",
+    "concern", "concerns", "risk", "risks", "breach", "hack",
+])
+
+_MACRO_KW = frozenset([
+    "federal reserve", "fomc", "rate decision", "powell", "fed meeting",
+    "consumer price index", "cpi report", "inflation data", "pce index",
+    "nonfarm payroll", "jobs report", "unemployment rate", "nfp",
+    "gdp report", "retail sales data", "ppi report", "trade deficit",
+])
+
+
+def sentiment_trend(symbol: str) -> int:
+    """
+    Fast keyword-based sentiment score for a ticker — no LLM, no cost.
+    Returns +1 (positive), 0 (neutral), -1 (negative).
+    Used for pre-market curation and signal enrichment.
+    """
+    try:
+        news = fetch_news(symbols=[symbol], limit=20)
+        pos = neg = 0
+        for n in news:
+            text = (n.get("headline", "") + " " + n.get("summary", "")).lower()
+            pos += sum(1 for kw in _POS_KW if kw in text)
+            neg += sum(1 for kw in _NEG_KW if kw in text)
+        if pos == 0 and neg == 0:
+            return 0
+        net = pos - neg
+        if net >= 2:
+            return 1
+        if net <= -2:
+            return -1
+        return 0
+    except Exception:
+        return 0
+
+
+def is_high_impact_macro_day() -> bool:
+    """
+    Return True if today's broad market news contains major scheduled macro events
+    (Fed decision, CPI, NFP, GDP). On these days suppress aggressive new entries.
+    """
+    if not config.MACRO_SUPPRESSION_ENABLED:
+        return False
+    try:
+        news = fetch_news(limit=15)  # broad market, no symbol filter
+        for n in news:
+            text = (n.get("headline", "") + " " + n.get("summary", "")).lower()
+            if any(kw in text for kw in _MACRO_KW):
+                return True
+        return False
+    except Exception:
+        return False
+
+
 # ── Unified event score for a symbol ──────────────────────────────────────────
 def get_event_score(symbol: str, run_earnings: bool = True, run_geo: bool = True, run_macro: bool = True) -> dict:
     """

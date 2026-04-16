@@ -1,5 +1,5 @@
 """
-Dynamic stock discovery — most active, top gainers, top losers, ETFs.
+Dynamic stock discovery — most active, top gainers, top losers, ETFs, sectors.
 Uses Alpaca's screener API (no extra subscription needed).
 """
 import requests
@@ -13,15 +13,40 @@ _BASE = "https://data.alpaca.markets/v1beta1/screener"
 
 # Curated ETF universe by theme
 ETF_UNIVERSE = {
-    "Broad Market": ["SPY", "QQQ", "IWM", "DIA", "VTI"],
-    "Tech":         ["XLK", "SOXX", "IGV", "ARKK", "SMH"],
-    "Energy":       ["XLE", "OIH", "UNG", "USO"],
-    "Finance":      ["XLF", "KRE", "IAI"],
-    "Healthcare":   ["XLV", "IBB", "XBI"],
-    "Bonds":        ["TLT", "AGG", "HYG", "LQD"],
-    "Commodities":  ["GLD", "SLV", "PDBC"],
-    "Volatility":   ["VXX", "UVXY"],
+    "Broad Market": ["SPY", "QQQ", "IWM", "DIA", "VTI", "RSP"],
+    "Tech":         ["XLK", "SOXX", "IGV", "ARKK", "SMH", "QTEC"],
+    "Energy":       ["XLE", "OIH", "UNG", "USO", "AMLP"],
+    "Finance":      ["XLF", "KRE", "IAI", "KBE"],
+    "Healthcare":   ["XLV", "IBB", "XBI", "IHI"],
+    "Bonds":        ["TLT", "AGG", "HYG", "LQD", "IEF", "SHY"],
+    "Commodities":  ["GLD", "SLV", "PDBC", "CPER", "DBA"],
+    "Real Estate":  ["VNQ", "XLRE", "IYR"],
+    "Utilities":    ["XLU", "VPU"],
+    "Industrials":  ["XLI", "ITA", "IYT"],
+    "Consumer":     ["XLY", "XLP", "IBUY"],
+    "Volatility":   ["VXX", "UVXY", "SVXY"],
 }
+
+# Representative sector stocks (large-cap leaders per sector)
+SECTOR_STOCKS = {
+    "Tech":         ["AAPL", "MSFT", "NVDA", "META", "GOOGL", "AMZN", "AMD", "AVGO", "ORCL", "ADBE"],
+    "Finance":      ["JPM", "BAC", "GS", "MS", "WFC", "BLK", "C", "AXP", "V", "MA"],
+    "Energy":       ["XOM", "CVX", "COP", "SLB", "EOG", "OXY", "MPC", "PSX", "VLO", "HES"],
+    "Healthcare":   ["JNJ", "UNH", "LLY", "ABBV", "MRK", "PFE", "TMO", "ABT", "DHR", "BMY"],
+    "Consumer":     ["TSLA", "AMZN", "HD", "MCD", "NKE", "SBUX", "TGT", "LOW", "GM", "F"],
+    "Industrials":  ["CAT", "BA", "HON", "UNP", "LMT", "RTX", "GE", "MMM", "DE", "FDX"],
+    "Real Estate":  ["AMT", "PLD", "CCI", "EQIX", "SPG", "PSA", "O", "WELL", "DLR", "AVB"],
+    "Utilities":    ["NEE", "DUK", "SO", "D", "AEP", "EXC", "XEL", "ES", "WEC", "AWK"],
+    "Broad Market": ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "AMZN", "GOOGL", "NVDA", "META", "TSLA"],
+}
+
+# Combined ETFs + stocks per sector (for "Sector" watchlist source)
+SECTOR_UNIVERSE: dict[str, list[str]] = {}
+for _sector in set(list(ETF_UNIVERSE.keys()) + list(SECTOR_STOCKS.keys())):
+    _syms: list[str] = []
+    _syms.extend(ETF_UNIVERSE.get(_sector, []))
+    _syms.extend(SECTOR_STOCKS.get(_sector, []))
+    SECTOR_UNIVERSE[_sector] = list(dict.fromkeys(_syms))  # dedup, preserve order
 
 
 def most_active(top_n: int = 10) -> list[dict]:
@@ -118,10 +143,38 @@ def _clean(rows: list[dict], price_field: str = "price") -> list[str]:
     return out
 
 
-def build_watchlist(source: str, top_n: int = 10, etf_themes: list[str] | None = None) -> list[str]:
+def trending(top_n: int = 15) -> list[str]:
+    """
+    Return symbols that are trending right now: merge top gainers + most active,
+    deduplicated, ordered by activity. Used for the live ticker tape header.
+    """
+    half = max(3, top_n // 2)
+    gainers  = _clean(top_gainers(half + 3))
+    actives  = _clean(most_active(half + 3))
+    seen: dict[str, None] = {}
+    for sym in gainers + actives:
+        seen[sym] = None
+    return list(seen.keys())[:top_n]
+
+
+def sector_list(sectors: list[str] | None = None) -> list[str]:
+    """Return ETF + stock symbols for the requested sectors."""
+    selected = sectors or list(SECTOR_UNIVERSE.keys())
+    syms: list[str] = []
+    for s in selected:
+        syms.extend(SECTOR_UNIVERSE.get(s, []))
+    return list(dict.fromkeys(syms))
+
+
+def build_watchlist(
+    source: str,
+    top_n: int = 10,
+    etf_themes: list[str] | None = None,
+    sectors: list[str] | None = None,
+) -> list[str]:
     """
     Build a dynamic watchlist.
-    source: "static" | "most_active" | "gainers" | "losers" | "etf"
+    source: "static" | "most_active" | "gainers" | "losers" | "etf" | "sector" | "trending"
     """
     if source == "most_active":
         return _clean(most_active(top_n))
@@ -131,4 +184,8 @@ def build_watchlist(source: str, top_n: int = 10, etf_themes: list[str] | None =
         return _clean(top_losers(top_n))
     if source == "etf":
         return etf_list(etf_themes)
+    if source == "sector":
+        return sector_list(sectors)
+    if source == "trending":
+        return trending(top_n)
     return config.WATCHLIST  # fallback to static

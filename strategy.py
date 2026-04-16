@@ -592,11 +592,18 @@ def compute_signals(bars: list[dict], market_trend: int = 0, earnings_soon: bool
         "reason":  "; ".join(reasons) if reasons else "no strong signal",
         "event_score":  0,
         "event_reasons": [],
-        "regime":              regime["regime"],
-        "regime_confidence":   regime["confidence"],
+        "regime":                regime["regime"],
+        "regime_confidence":     regime["confidence"],
         "regime_trend_strength": regime["trend_strength"],
-        "regime_realized_vol": regime["realized_vol"],
-        "market_trend": market_trend,
+        "regime_realized_vol":   regime["realized_vol"],
+        "market_trend":          market_trend,
+        "earnings_soon":         earnings_soon,
+        # Individual component scores — exposed for agent context
+        **{k: component_scores.get(k, 0) for k in (
+            "ema_score", "macd_score", "rsi_score", "bb_score",
+            "supertrend_score", "vwap_score", "breakout_score",
+            "momentum_score", "adx_score",
+        )},
     }
 
 
