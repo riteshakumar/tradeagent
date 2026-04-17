@@ -3,6 +3,7 @@ Claude agent — evaluates trade signals with full quant context + live news.
 
 Mirrors agent_openai.py logic using Anthropic's tool-use API.
 """
+import html
 import json
 import logging
 
@@ -68,8 +69,8 @@ def _run_tool(name: str, inputs: dict) -> str:
             limit = int(inputs.get("limit", 8))
             news = events.fetch_news(symbols=[sym], limit=limit)
             headlines = [
-                {"time": n.get("created", "")[:16], "headline": n["headline"], "source": n.get("source", "")}
-                for n in news if n.get("headline") and "[news fetch error" not in n["headline"]
+                {"time": n.get("created", "")[:16], "headline": html.escape(n["headline"]), "source": n.get("source", "")}
+                for n in news if n.get("headline")
             ]
             return json.dumps({"symbol": sym, "headlines": headlines})
         except Exception as exc:
@@ -146,9 +147,9 @@ def evaluate_signal(symbol: str, signal: dict) -> dict:
         import events
         news = events.fetch_news(symbols=[symbol], limit=6)
         headlines = [
-            f"  [{n.get('created','')[:10]}] {n['headline']}"
+            f"  [{n.get('created','')[:10]}] {html.escape(n['headline'])}"
             for n in news
-            if n.get("headline") and "[news fetch error" not in n["headline"]
+            if n.get("headline")
         ]
         if headlines:
             news_block = "\n═══ RECENT NEWS (" + symbol + ") ═══\n" + "\n".join(headlines[:6])

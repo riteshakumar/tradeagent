@@ -72,7 +72,7 @@ def reset_state():
     main._position_stops.clear()
     main._exit_holds.clear()
     risk.reset_halts(reset_peak=True)
-    risk._last_order_time.clear()   # prevent cooldown bleed between tests
+    risk._manager.last_order_time.clear()   # prevent cooldown bleed between tests
     yield
 
 
@@ -135,7 +135,7 @@ def test_earnings_suppresses_buy(monkeypatch):
     monkeypatch.setattr(events, "is_earnings_period", lambda *a, **kw: True)
     # earnings_soon=True is passed to compute_signals; strategy returns hold
     import strategy
-    def _hold_on_earnings(bars, market_trend=0, earnings_soon=False):
+    def _hold_on_earnings(bars, market_trend=0, earnings_soon=False, threshold=None, timeframe=None):
         s = _signal("hold" if earnings_soon else "buy", score=6)
         s["earnings_soon"] = earnings_soon
         return s

@@ -52,8 +52,16 @@ def _send_telegram(subject: str, body: str):
         log.error(f"Telegram alert failed: {e}")
 
 
-def send(subject: str, body: str):
-    """Fire alert to all configured channels."""
+def send(subject: str, body: str) -> None:
+    """Fire alert to all configured channels. Failures are logged but never propagated."""
+    channels_configured = any([
+        all([config.ALERT_EMAIL_TO, config.ALERT_SMTP_USER, config.ALERT_SMTP_PASS]),
+        bool(config.ALERT_SLACK_WEBHOOK),
+        all([config.ALERT_TELEGRAM_TOKEN, config.ALERT_TELEGRAM_CHAT_ID]),
+    ])
+    if not channels_configured:
+        log.warning("No alert channels configured — alert not delivered: %s", subject)
+        return
     _send_email(subject, body)
     _send_slack(subject, body)
     _send_telegram(subject, body)

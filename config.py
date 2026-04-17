@@ -162,20 +162,45 @@ EXIT_REVIEW_TRIGGER_PCT    = _env_float("EXIT_REVIEW_TRIGGER_PCT", 0.5, minimum=
 MAX_EXIT_HOLDS             = _env_int("MAX_EXIT_HOLDS", 2, minimum=0, maximum=5)
 MACRO_SUPPRESSION_ENABLED  = _env_bool("MACRO_SUPPRESSION_ENABLED", True)
 
+# ── Order slicing (TWAP chunked execution for large orders) ────────────────────
+ENABLE_ORDER_SLICING   = _env_bool("ENABLE_ORDER_SLICING", False)
+ORDER_SLICE_MAX_QTY    = _env_int("ORDER_SLICE_MAX_QTY", 50, minimum=1)
+ORDER_SLICE_DELAY_SEC  = _env_float("ORDER_SLICE_DELAY_SEC", 30.0, minimum=1.0)
+
+# ── Portfolio rebalancing ──────────────────────────────────────────────────────
+REBALANCE_INTERVAL_DAYS    = _env_int("REBALANCE_INTERVAL_DAYS", 30, minimum=1)
+REBALANCE_DRIFT_THRESHOLD  = _env_float("REBALANCE_DRIFT_THRESHOLD", 0.05, minimum=0.0, maximum=0.5)
+
+
+def masked_key(value: str, visible: int = 4) -> str:
+    """Return a safely truncated API key suitable for log output."""
+    if not value or len(value) <= visible:
+        return "***"
+    return value[:visible] + "***"
+
 
 def is_order_execution_enabled() -> bool:
     return not (DRY_RUN or SHADOW_MODE)
 
 
 def validate_runtime() -> None:
+    import logging
+    _vlog = logging.getLogger(__name__)
+
     if _looks_like_placeholder(ALPACA_API_KEY) or _looks_like_placeholder(ALPACA_SECRET_KEY):
         raise RuntimeError("Missing valid Alpaca credentials. Set ALPACA_API_KEY and ALPACA_SECRET_KEY in .env.")
+
+    _vlog.info("Alpaca key: %s  paper=%s", masked_key(ALPACA_API_KEY), PAPER_TRADING)
 
     if USE_AGENT and AGENT_PROVIDER == "openai" and _looks_like_placeholder(OPENAI_API_KEY):
         raise RuntimeError("AGENT_PROVIDER=openai requires a valid OPENAI_API_KEY.")
 
     if USE_AGENT and AGENT_PROVIDER == "claude" and _looks_like_placeholder(ANTHROPIC_API_KEY):
         raise RuntimeError("AGENT_PROVIDER=claude requires a valid ANTHROPIC_API_KEY.")
+
+    if USE_AGENT:
+        key = OPENAI_API_KEY if AGENT_PROVIDER == "openai" else ANTHROPIC_API_KEY
+        _vlog.info("Agent provider: %s  key: %s", AGENT_PROVIDER, masked_key(key))
 
     if not PAPER_TRADING and is_order_execution_enabled() and not CONFIRM_LIVE_TRADING:
         raise RuntimeError(

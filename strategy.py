@@ -15,10 +15,72 @@ _REGIME_WEIGHTS = {
     "high_volatility":{"rsi": 0.90, "macd": 0.80, "ema": 0.80, "bb": 1.30, "volume": 1.2, "momentum": 1.00, "breakout": 1.20, "supertrend": 1.00, "vwap": 1.0},
 }
 _BASE_WEIGHTS = {k: 1.0 for k in ("rsi", "macd", "ema", "bb", "volume", "momentum", "breakout", "supertrend", "vwap")}
+_INTRADAY_TIMEFRAMES = {"1Min", "5Min", "15Min", "1Hour"}
+_TIMEFRAME_MINUTES = {
+    "1Min": 1,
+    "5Min": 5,
+    "15Min": 15,
+    "1Hour": 60,
+    "1Day": 390,
+}
+_PERIODS_PER_DAY = {
+    "1Min": 390.0,
+    "5Min": 78.0,
+    "15Min": 26.0,
+    "1Hour": 6.5,
+    "1Day": 1.0,
+}
+_TIMEFRAME_SIGNAL_THRESHOLD_OFFSET = {
+    "1Min": 2,
+    "5Min": 1,
+    "15Min": 0,
+    "1Hour": 0,
+    "1Day": 0,
+}
 
 # ADX thresholds for hard mode switching
 _ADX_TREND_MIN = 25   # above this → trending mode (EMA/MACD/Supertrend/Breakout)
 _ADX_RANGE_MAX = 20   # below this → ranging mode (RSI/BB only)
+
+
+def _infer_timeframe(df: pd.DataFrame) -> str:
+    if "t" not in df.columns or len(df) < 2:
+        return "1Day"
+    try:
+        ts = pd.to_datetime(df["t"]).sort_values()
+        deltas = ts.diff().dropna().dt.total_seconds().div(60.0)
+        if deltas.empty:
+            return "1Day"
+        median_minutes = float(deltas.median())
+        if median_minutes <= 2:
+            return "1Min"
+        if median_minutes <= 10:
+            return "5Min"
+        if median_minutes <= 30:
+            return "15Min"
+        if median_minutes <= 180:
+            return "1Hour"
+    except Exception:
+        pass
+    return "1Day"
+
+
+def _resolve_timeframe(timeframe: str | None, df: pd.DataFrame) -> str:
+    if timeframe in _TIMEFRAME_MINUTES:
+        return timeframe
+    return _infer_timeframe(df)
+
+
+def _is_intraday_timeframe(timeframe: str) -> bool:
+    return timeframe in _INTRADAY_TIMEFRAMES
+
+
+def _resolve_signal_threshold(timeframe: str, threshold: int | None) -> int:
+    if threshold is not None:
+        return int(threshold)
+    base = int(config.SIGNAL_THRESHOLD)
+    adjusted = base + _TIMEFRAME_SIGNAL_THRESHOLD_OFFSET.get(timeframe, 0)
+    return max(1, min(10, adjusted))
 
 
 # ---------------------------------------------------------------------------
@@ -259,9 +321,21 @@ def _vwap_score(df: pd.DataFrame) -> tuple[int, str]:
     +1 if price > VWAP (institutional net buying pressure)
     −1 if price < VWAP (institutional net selling pressure)
     Only meaningful for intraday bars; low weight on daily.
+    Filters df to the current session (last date) before computing VWAP
+    to avoid cross-day cumsum contamination.
     """
     if len(df) < 5:
         return 0, ""
+    # Restrict to current trading session so cumsum resets daily
+    if "t" in df.columns:
+        try:
+            ts = pd.to_datetime(df["t"])
+            last_date = ts.iloc[-1].date()
+            session_df = df[ts.dt.date == last_date].copy()
+            if len(session_df) >= 5:
+                df = session_df
+        except Exception:
+            pass
     vwap_series = _vwap(df)
     last_vwap = float(vwap_series.iloc[-1])
     price = float(df["c"].astype(float).iloc[-1])
@@ -342,7 +416,7 @@ def _check_indicator_agreement(component_scores: dict[str, int]) -> bool:
 # Regime detection
 # ---------------------------------------------------------------------------
 
-def detect_regime(df: pd.DataFrame) -> dict:
+def detect_regime(df: pd.DataFrame, timeframe: str = "1Day") -> dict:
     close = df["c"].astype(float)
     if len(close) < 60:
         return {"regime": "range", "confidence": 0.25, "trend_strength": 0.0, "realized_vol": 0.0}
@@ -351,7 +425,8 @@ def detect_regime(df: pd.DataFrame) -> dict:
     ema50 = _ema(close, 50).iloc[-1]
     price = float(close.iloc[-1])
     trend_strength = ((ema20 - ema50) / price) if price else 0.0
-    realized_vol   = float(close.pct_change().dropna().tail(20).std())
+    bar_vol = float(close.pct_change().dropna().tail(20).std())
+    realized_vol = bar_vol * (_PERIODS_PER_DAY.get(timeframe, 1.0) ** 0.5)
 
     trend_threshold = config.TREND_STRENGTH_THRESHOLD
     vol_threshold   = config.HIGH_VOL_THRESHOLD
@@ -381,6 +456,7 @@ def _score_components(
     close: pd.Series,
     volume: pd.Series,
     df: pd.DataFrame,
+    timeframe: str = "1Day",
     is_intraday: bool = False,
 ) -> tuple[dict[str, int], dict[str, str], dict, float]:
     """
@@ -424,7 +500,24 @@ def _score_components(
     # ------------------------------------------------------------------
     # Hard mode switching
     # ------------------------------------------------------------------
-    if adx_value >= _ADX_TREND_MIN:
+    if not config.ENABLE_REGIME_SWITCHING:
+        for name, (score, reason) in {
+            "rsi":        _rsi_score(last_rsi, prev_rsi),
+            "macd":       _macd_score(macd_line, signal_line),
+            "ema":        _ema_score(price, e20, e50, e200, e20_prev, e50_prev),
+            "bb":         _bb_score(price, last_upper, last_lower, bb_width_pct),
+            "supertrend": _supertrend_score(st_dir),
+        }.items():
+            if score:
+                component_scores[name] = score
+                component_reasons[name] = reason
+
+        bo_score, bo_reason = _breakout_score(close, volume)
+        if bo_score:
+            component_scores["breakout"] = bo_score
+            component_reasons["breakout"] = bo_reason
+
+    elif adx_value >= _ADX_TREND_MIN:
         # TRENDING mode: trend-following only
         for name, (score, reason) in {
             "macd":       _macd_score(macd_line, signal_line),
@@ -481,7 +574,7 @@ def _score_components(
             component_scores["vwap"] = vw_score
             component_reasons["vwap"] = vw_reason
 
-    regime     = detect_regime(df)
+    regime     = detect_regime(df, timeframe=timeframe)
     base_score = float(sum(component_scores.values()))
     vol_score, vol_reason = _volume_score(volume, base_score)
     if vol_score:
@@ -500,7 +593,13 @@ def _score_components(
 # Public API
 # ---------------------------------------------------------------------------
 
-def compute_signals(bars: list[dict], market_trend: int = 0, earnings_soon: bool = False) -> dict:
+def compute_signals(
+    bars: list[dict],
+    market_trend: int = 0,
+    earnings_soon: bool = False,
+    threshold: int | None = None,
+    timeframe: str | None = None,
+) -> dict:
     """
     Compute trading signals from OHLCV bars.
 
@@ -509,6 +608,10 @@ def compute_signals(bars: list[dict], market_trend: int = 0, earnings_soon: bool
         market_trend: +1 = SPY above EMA200 (bull), -1 = bear, 0 = unknown.
                       buy signals suppressed when -1.
         earnings_soon: If True, suppress buy signals (earnings risk window).
+        threshold: Optional signal threshold override. Defaults to
+                   config.SIGNAL_THRESHOLD when not provided.
+        timeframe: Optional timeframe override. Used for intraday detection,
+                   regime volatility normalisation, and default threshold tuning.
     """
     empty = {
         "signal": "hold", "reason": "not enough data", "score": 0,
@@ -516,6 +619,7 @@ def compute_signals(bars: list[dict], market_trend: int = 0, earnings_soon: bool
         "event_score": 0, "event_reasons": [],
         "regime": "range", "regime_confidence": 0.0,
         "market_trend": market_trend,
+        "timeframe": timeframe or "1Day",
     }
     if len(bars) < 30:
         return empty
@@ -526,20 +630,16 @@ def compute_signals(bars: list[dict], market_trend: int = 0, earnings_soon: bool
             df[col] = df["c"]
     close  = df["c"].astype(float)
     volume = df["v"].astype(float)
+    resolved_timeframe = _resolve_timeframe(timeframe, df)
+    is_intraday = _is_intraday_timeframe(resolved_timeframe)
 
-    # Determine if intraday: proxy = many bars but short total time span
-    is_intraday = False
-    if "t" in df.columns and len(df) >= 2:
-        try:
-            t0 = pd.to_datetime(df["t"].iloc[0])
-            t1 = pd.to_datetime(df["t"].iloc[-1])
-            total_hours = (t1 - t0).total_seconds() / 3600
-            # If 50+ bars cover < 5 trading days worth of hours, it's intraday
-            is_intraday = len(df) >= 50 and total_hours < (5 * 6.5)
-        except Exception:
-            pass
-
-    component_scores, component_reasons, regime, adx_value = _score_components(close, volume, df, is_intraday)
+    component_scores, component_reasons, regime, adx_value = _score_components(
+        close,
+        volume,
+        df,
+        timeframe=resolved_timeframe,
+        is_intraday=is_intraday,
+    )
     weights = _BASE_WEIGHTS
     if config.ENABLE_REGIME_SWITCHING:
         weights = _REGIME_WEIGHTS.get(regime["regime"], _BASE_WEIGHTS)
@@ -552,7 +652,7 @@ def compute_signals(bars: list[dict], market_trend: int = 0, earnings_soon: bool
         reasons.append(f"{component_reasons[name]} [{name} x{weight:.2f}]")
 
     score = int(round(weighted_score))
-    t = config.SIGNAL_THRESHOLD
+    t = _resolve_signal_threshold(resolved_timeframe, threshold)
     signal = "buy" if score >= t else ("sell" if score <= -t else "hold")
 
     # ------------------------------------------------------------------
@@ -596,6 +696,7 @@ def compute_signals(bars: list[dict], market_trend: int = 0, earnings_soon: bool
         "regime_confidence":     regime["confidence"],
         "regime_trend_strength": regime["trend_strength"],
         "regime_realized_vol":   regime["realized_vol"],
+        "timeframe":             resolved_timeframe,
         "market_trend":          market_trend,
         "earnings_soon":         earnings_soon,
         # Individual component scores — exposed for agent context

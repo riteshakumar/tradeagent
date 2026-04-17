@@ -29,7 +29,7 @@ def test_drawdown_halt_latches(monkeypatch):
 
 def test_daily_loss_stop_blocks_pre_trade(monkeypatch):
     risk.reset_halts(reset_peak=True)
-    risk._last_order_time.clear()   # ensure no cooldown bleeds from prior tests
+    risk._manager.last_order_time.clear()   # ensure no cooldown bleeds from prior tests
     monkeypatch.setattr(config, "DAILY_LOSS_STOP_PCT", 0.02)
     monkeypatch.setattr(config, "ENABLE_CORRELATION_CAP", False)
     monkeypatch.setattr(config, "MAX_SECTOR_EXPOSURE_PCT", 1.0)

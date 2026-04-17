@@ -10,8 +10,12 @@ Each returns an EventSignal with score (-3..+3) and reason string.
 Score is added on top of the quant score in strategy.py.
 """
 import json
+import logging
+from datetime import date
 import requests
 import config
+
+log = logging.getLogger(__name__)
 
 # ── Sector maps ────────────────────────────────────────────────────────────────
 SECTOR_MAP = {
@@ -55,7 +59,8 @@ def fetch_news(symbols: list[str] | None = None, keywords: str | None = None, li
             for a in r.json().get("news", [])
         ]
     except Exception as e:
-        return [{"headline": f"[news fetch error: {e}]", "summary": "", "source": "", "created": "", "symbols": []}]
+        log.warning("News fetch failed: %s", e)
+        return []
 
 
 # ── LLM sentiment scorer ───────────────────────────────────────────────────────
@@ -120,9 +125,9 @@ def geopolitical_signal(symbol: str) -> dict:
 
     keywords = "Iran Hormuz war sanctions oil defense conflict" if sector == "oil" else "defense spending military conflict NATO war"
     news = fetch_news(symbols=[symbol], keywords=keywords, limit=8)
-    headlines = "\n".join(f"- {n['headline']}" for n in news if n["headline"])
+    headlines = "\n".join(f"- {n['headline']}" for n in news if n.get("headline"))
 
-    if not headlines.strip() or "[news fetch error" in headlines:
+    if not headlines.strip():
         return {"score": 0, "reason": "no relevant geopolitical news found", "confidence": "low", "event_type": "geopolitical"}
 
     prompt = (
@@ -142,9 +147,9 @@ def earnings_signal(symbol: str) -> dict:
     Returns: {score, reason, confidence, event_type}
     """
     news = fetch_news(symbols=[symbol], keywords="earnings EPS revenue guidance beat miss forecast", limit=8)
-    headlines = "\n".join(f"- {n['headline']}: {n['summary'][:120]}" for n in news if n["headline"])
+    headlines = "\n".join(f"- {n['headline']}: {n['summary'][:120]}" for n in news if n.get("headline"))
 
-    if not headlines.strip() or "[news fetch error" in headlines:
+    if not headlines.strip():
         return {"score": 0, "reason": "no earnings news found", "confidence": "low", "event_type": "earnings"}
 
     prompt = (
@@ -174,9 +179,9 @@ def macro_signal(symbol: str) -> dict:
         return {"score": 0, "reason": "not a macro-sensitive stock", "confidence": "low", "event_type": "macro"}
 
     news = fetch_news(keywords="inflation CPI Fed interest rates Federal Reserve FOMC Treasury yield", limit=10)
-    headlines = "\n".join(f"- {n['headline']}" for n in news if n["headline"])
+    headlines = "\n".join(f"- {n['headline']}" for n in news if n.get("headline"))
 
-    if not headlines.strip() or "[news fetch error" in headlines:
+    if not headlines.strip():
         return {"score": 0, "reason": "no macro news found", "confidence": "low", "event_type": "macro"}
 
     sector_context = {
@@ -219,8 +224,8 @@ def is_earnings_period(symbol: str, pre_days: int = 5, post_days: int = 2) -> bo
 
         for n in news:
             headline = n.get("headline", "").lower()
-            if not headline or "[news fetch error" in headline:
-                break
+            if not headline:
+                continue
 
             # Check if the news is very recent (post-earnings vol window)
             created_str = n.get("created", "")
@@ -272,6 +277,35 @@ _MACRO_KW = frozenset([
     "gdp report", "retail sales data", "ppi report", "trade deficit",
 ])
 
+# Hardcoded high-impact macro dates (FOMC decisions, CPI releases, NFP) for 2025-2026.
+# Update annually; used as a reliable first-pass before the news scan.
+_KNOWN_MACRO_DATES: frozenset[date] = frozenset([
+    # FOMC 2025
+    date(2025, 1, 29), date(2025, 3, 19), date(2025, 5, 7),
+    date(2025, 6, 18), date(2025, 7, 30), date(2025, 9, 17),
+    date(2025, 10, 29), date(2025, 12, 10),
+    # FOMC 2026
+    date(2026, 1, 28), date(2026, 3, 18), date(2026, 4, 29),
+    date(2026, 6, 17), date(2026, 7, 29), date(2026, 9, 16),
+    date(2026, 10, 28), date(2026, 12, 9),
+    # CPI 2025 (approx 2nd-3rd Wed each month)
+    date(2025, 1, 15), date(2025, 2, 12), date(2025, 3, 12),
+    date(2025, 4, 10), date(2025, 5, 13), date(2025, 6, 11),
+    date(2025, 7, 11), date(2025, 8, 13), date(2025, 9, 10),
+    date(2025, 10, 15), date(2025, 11, 13), date(2025, 12, 10),
+    # CPI 2026
+    date(2026, 1, 14), date(2026, 2, 11), date(2026, 3, 11),
+    date(2026, 4, 10), date(2026, 5, 13), date(2026, 6, 10),
+    # NFP 2025 (first Fri of month)
+    date(2025, 1, 10), date(2025, 2, 7), date(2025, 3, 7),
+    date(2025, 4, 4), date(2025, 5, 2), date(2025, 6, 6),
+    date(2025, 7, 3), date(2025, 8, 1), date(2025, 9, 5),
+    date(2025, 10, 3), date(2025, 11, 7), date(2025, 12, 5),
+    # NFP 2026
+    date(2026, 1, 9), date(2026, 2, 6), date(2026, 3, 6),
+    date(2026, 4, 3), date(2026, 5, 1), date(2026, 6, 5),
+])
+
 
 def sentiment_trend(symbol: str) -> int:
     """
@@ -300,11 +334,15 @@ def sentiment_trend(symbol: str) -> int:
 
 def is_high_impact_macro_day() -> bool:
     """
-    Return True if today's broad market news contains major scheduled macro events
-    (Fed decision, CPI, NFP, GDP). On these days suppress aggressive new entries.
+    Return True on days with major scheduled macro events (FOMC, CPI, NFP, GDP).
+    Checks hardcoded calendar first (zero latency), then falls back to news scan.
     """
     if not config.MACRO_SUPPRESSION_ENABLED:
         return False
+    today = date.today()
+    if today in _KNOWN_MACRO_DATES:
+        log.info("Macro calendar hit: %s is a known high-impact event date", today)
+        return True
     try:
         news = fetch_news(limit=15)  # broad market, no symbol filter
         for n in news:

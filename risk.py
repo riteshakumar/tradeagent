@@ -7,15 +7,6 @@ import config
 
 log = logging.getLogger(__name__)
 
-_peak_equity: float = 0.0
-_drawdown_halted: bool = False
-_last_order_time: dict[str, float] = {}  # symbol -> epoch time of last order
-
-_daily_anchor_date: date | None = None
-_daily_anchor_equity: float = 0.0
-_daily_loss_halted: bool = False
-_daily_loss_pct: float = 0.0
-
 _DEFAULT_SYMBOL_SECTORS = {
     "AAPL": "technology",
     "MSFT": "technology",
@@ -47,6 +38,126 @@ _DEFAULT_SYMBOL_SECTORS = {
     "SOXX": "technology",
 }
 
+
+class RiskManager:
+    """
+    Encapsulates all mutable risk state.
+    Use the module-level singleton `_manager` via the public wrapper functions below.
+    Instantiate a fresh RiskManager() in tests to avoid cross-test contamination.
+    """
+
+    def __init__(self) -> None:
+        self.peak_equity: float = 0.0
+        self.drawdown_halted: bool = False
+        self.last_order_time: dict[str, float] = {}
+
+        self.daily_anchor_date: date | None = None
+        self.daily_anchor_equity: float = 0.0
+        self.daily_loss_halted: bool = False
+        self.daily_loss_pct: float = 0.0
+
+    # ------------------------------------------------------------------
+    # Drawdown
+    # ------------------------------------------------------------------
+
+    def evaluate_drawdown(self, account: dict) -> dict:
+        equity = float(account["equity"])
+        if self.peak_equity <= 0:
+            self.peak_equity = equity
+        if equity > self.peak_equity:
+            self.peak_equity = equity
+        drawdown = (self.peak_equity - equity) / self.peak_equity if self.peak_equity > 0 else 0.0
+
+        just_triggered = False
+        if not self.drawdown_halted and drawdown >= config.MAX_DRAWDOWN_PCT:
+            self.drawdown_halted = True
+            just_triggered = True
+        return {
+            "peak_equity": self.peak_equity,
+            "equity": equity,
+            "drawdown_pct": drawdown,
+            "halted": self.drawdown_halted,
+            "just_triggered": just_triggered,
+        }
+
+    # ------------------------------------------------------------------
+    # Daily loss guard
+    # ------------------------------------------------------------------
+
+    def update_daily_loss_guard(self, account: dict, now: datetime | None = None) -> dict:
+        ts = now or datetime.now(timezone.utc)
+        today = ts.date()
+        equity = float(account["equity"])
+
+        if self.daily_anchor_date != today or self.daily_anchor_equity <= 0:
+            self.daily_anchor_date = today
+            self.daily_anchor_equity = equity
+            self.daily_loss_halted = False
+            self.daily_loss_pct = 0.0
+
+        if self.daily_anchor_equity > 0:
+            self.daily_loss_pct = (self.daily_anchor_equity - equity) / self.daily_anchor_equity
+        else:
+            self.daily_loss_pct = 0.0
+
+        if config.DAILY_LOSS_STOP_PCT > 0 and self.daily_loss_pct >= config.DAILY_LOSS_STOP_PCT:
+            self.daily_loss_halted = True
+
+        return {
+            "anchor_date": self.daily_anchor_date,
+            "anchor_equity": self.daily_anchor_equity,
+            "daily_loss_pct": self.daily_loss_pct,
+            "halted": self.daily_loss_halted,
+        }
+
+    # ------------------------------------------------------------------
+    # Order cooldown
+    # ------------------------------------------------------------------
+
+    def check_cooldown(self, symbol: str) -> bool:
+        last = self.last_order_time.get(symbol, 0)
+        elapsed = time.time() - last
+        if elapsed < config.ORDER_COOLDOWN_SEC:
+            log.warning("%s: cooldown active - %.0fs remaining", symbol, config.ORDER_COOLDOWN_SEC - elapsed)
+            return False
+        return True
+
+    def record_order(self, symbol: str) -> None:
+        self.last_order_time[symbol] = time.time()
+
+    # ------------------------------------------------------------------
+    # Reset / snapshot
+    # ------------------------------------------------------------------
+
+    def reset_halts(self, reset_peak: bool = False) -> None:
+        self.drawdown_halted = False
+        self.daily_loss_halted = False
+        self.daily_loss_pct = 0.0
+        self.daily_anchor_equity = 0.0
+        self.daily_anchor_date = None
+        if reset_peak:
+            self.peak_equity = 0.0
+
+    def snapshot(self) -> dict:
+        return {
+            "peak_equity": self.peak_equity,
+            "drawdown_halted": self.drawdown_halted,
+            "daily_anchor_date": str(self.daily_anchor_date) if self.daily_anchor_date else "",
+            "daily_anchor_equity": self.daily_anchor_equity,
+            "daily_loss_halted": self.daily_loss_halted,
+            "daily_loss_pct": self.daily_loss_pct,
+        }
+
+
+# Module-level singleton — used by all production code.
+# Tests should create their own RiskManager() instances.
+_manager = RiskManager()
+
+
+# ===========================================================================
+# Public API — thin wrappers around the singleton.
+# All callers use these functions; the class is an implementation detail.
+# ===========================================================================
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -119,85 +230,35 @@ def compute_qty(
 
 
 def check_cooldown(symbol: str) -> bool:
-    last = _last_order_time.get(symbol, 0)
-    elapsed = time.time() - last
-    if elapsed < config.ORDER_COOLDOWN_SEC:
-        log.warning("%s: cooldown active - %.0fs remaining", symbol, config.ORDER_COOLDOWN_SEC - elapsed)
-        return False
-    return True
+    return _manager.check_cooldown(symbol)
 
 
 def record_order(symbol: str) -> None:
-    _last_order_time[symbol] = time.time()
+    _manager.record_order(symbol)
 
 
 def evaluate_drawdown(account: dict) -> dict:
-    global _peak_equity, _drawdown_halted
-    equity = float(account["equity"])
-    if _peak_equity <= 0:
-        _peak_equity = equity
-    if equity > _peak_equity:
-        _peak_equity = equity
-    drawdown = (_peak_equity - equity) / _peak_equity if _peak_equity > 0 else 0.0
-
-    just_triggered = False
-    if not _drawdown_halted and drawdown >= config.MAX_DRAWDOWN_PCT:
-        _drawdown_halted = True
-        just_triggered = True
-    return {
-        "peak_equity": _peak_equity,
-        "equity": equity,
-        "drawdown_pct": drawdown,
-        "halted": _drawdown_halted,
-        "just_triggered": just_triggered,
-    }
+    return _manager.evaluate_drawdown(account)
 
 
 def check_drawdown(account: dict) -> bool:
-    return evaluate_drawdown(account)["halted"]
+    return _manager.evaluate_drawdown(account)["halted"]
 
 
 def update_daily_loss_guard(account: dict, now: datetime | None = None) -> dict:
-    global _daily_anchor_date, _daily_anchor_equity, _daily_loss_halted, _daily_loss_pct
-    ts = now or _now_utc()
-    today = ts.date()
-    equity = float(account["equity"])
-
-    if _daily_anchor_date != today or _daily_anchor_equity <= 0:
-        _daily_anchor_date = today
-        _daily_anchor_equity = equity
-        _daily_loss_halted = False
-        _daily_loss_pct = 0.0
-
-    if _daily_anchor_equity > 0:
-        _daily_loss_pct = (_daily_anchor_equity - equity) / _daily_anchor_equity
-    else:
-        _daily_loss_pct = 0.0
-
-    if config.DAILY_LOSS_STOP_PCT > 0 and _daily_loss_pct >= config.DAILY_LOSS_STOP_PCT:
-        _daily_loss_halted = True
-
-    return {
-        "anchor_date": _daily_anchor_date,
-        "anchor_equity": _daily_anchor_equity,
-        "daily_loss_pct": _daily_loss_pct,
-        "halted": _daily_loss_halted,
-    }
+    return _manager.update_daily_loss_guard(account, now)
 
 
 def is_daily_loss_halted() -> bool:
-    return _daily_loss_halted
+    return _manager.daily_loss_halted
 
 
 def reset_halts(reset_peak: bool = False) -> None:
-    global _drawdown_halted, _daily_loss_halted, _daily_anchor_equity, _daily_anchor_date, _daily_loss_pct, _peak_equity
-    _drawdown_halted = False
-    _daily_loss_halted = False
-    _daily_loss_pct = 0.0
-    _daily_anchor_equity = 0.0
-    _daily_anchor_date = None
-    if reset_peak:
-        _peak_equity = 0.0
+    _manager.reset_halts(reset_peak)
+
+
+def snapshot() -> dict:
+    return _manager.snapshot()
 
 
 def already_positioned(symbol: str, positions: list[dict]) -> bool:
@@ -354,17 +415,6 @@ def pre_trade_checks(
     return True, "ok"
 
 
-def snapshot() -> dict:
-    return {
-        "peak_equity": _peak_equity,
-        "drawdown_halted": _drawdown_halted,
-        "daily_anchor_date": str(_daily_anchor_date) if _daily_anchor_date else "",
-        "daily_anchor_equity": _daily_anchor_equity,
-        "daily_loss_halted": _daily_loss_halted,
-        "daily_loss_pct": _daily_loss_pct,
-    }
-
-
 def check_time_of_day(now: datetime | None = None) -> tuple[bool, str]:
     """
     Block new entries during the first MARKET_OPEN_BUFFER_MIN minutes after
@@ -389,7 +439,7 @@ def check_time_of_day(now: datetime | None = None) -> tuple[bool, str]:
         if ts > close_cutoff:
             return False, f"closing buffer active (last {config.MARKET_CLOSE_BUFFER_MIN}min of session)"
     except Exception as exc:
-        log.debug("time-of-day check error: %s", exc)
+        log.warning("time-of-day check error — proceeding without filter: %s", exc)
     return True, "ok"
 
 
@@ -412,5 +462,5 @@ def check_gap(bars: list[dict], max_gap_pct: float | None = None) -> tuple[bool,
             direction = "up" if gap > 0 else "down"
             return False, f"gap-{direction} {abs(gap)*100:.1f}% exceeds {threshold*100:.0f}% filter"
     except Exception as exc:
-        log.debug("gap check error: %s", exc)
+        log.warning("gap check error — proceeding without filter: %s", exc)
     return True, "ok"

@@ -236,6 +236,25 @@ div[data-testid="stRadio"] label:has(input:checked) p {
 
 /* ── Spinner ── */
 [data-testid="stSpinner"] { color: #615fff !important; }
+
+/* ── Metric hover glow ── */
+[data-testid="stMetric"] { transition: border-color 0.2s ease, box-shadow 0.2s ease; }
+[data-testid="stMetric"]:hover { border-color: #615fff !important; box-shadow: 0 4px 24px #615fff22 !important; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0a0f1e; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #615fff; }
+
+/* ── Toggle ── */
+[data-testid="stToggle"] > label > div[data-testid="stMarkdownContainer"] p {
+    font-size: 0.82rem !important;
+    color: #94a3b8 !important;
+}
+
+/* ── Inner expander header text ── */
+[data-testid="stExpander"] summary span { font-weight: 600 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -444,7 +463,7 @@ def build_signal_snapshot(watchlist, bar_timeframe, run_agent: bool = False):
         for symbol in watchlist:
             try:
                 bars = broker.get_bars(symbol, timeframe=bar_timeframe)
-                sig = strategy.compute_signals(bars)
+                sig = strategy.compute_signals(bars, timeframe=bar_timeframe)
                 signal_cache[symbol] = sig
 
                 agent_val = "—"
@@ -531,9 +550,13 @@ def render_control_deck():
 
         with top_left:
             st.markdown("**Watchlist Source**")
+            _ws_options = ["my_list", "trending", "most_active", "gainers", "losers", "sector", "etf"]
+            _ws_saved = settings_store.get("watch_source", "my_list")
+            _ws_default_idx = _ws_options.index(_ws_saved) if _ws_saved in _ws_options else 0
             watch_source = st.selectbox(
                 "",
-                ["my_list", "trending", "most_active", "gainers", "losers", "sector", "etf"],
+                _ws_options,
+                index=_ws_default_idx,
                 format_func=lambda x: {
                     "my_list":     "My List",
                     "trending":    "🔥 Trending Now",
@@ -545,6 +568,8 @@ def render_control_deck():
                 }[x],
                 label_visibility="collapsed",
             )
+            if watch_source != _ws_saved:
+                settings_store.save({"watch_source": watch_source})
 
             if not watchlist_store.load():
                 for _sym in config.WATCHLIST:
@@ -589,13 +614,18 @@ def render_control_deck():
 
         with top_mid:
             st.markdown("**Chart Feed**")
+            _tf_options = ["1Min", "5Min", "15Min", "1Hour", "1Day"]
+            _tf_saved = settings_store.get("bar_timeframe", config.BAR_TIMEFRAME)
+            _tf_saved = _tf_saved if _tf_saved in _tf_options else config.BAR_TIMEFRAME
             bar_timeframe = st.selectbox(
                 "",
-                ["1Min", "5Min", "15Min", "1Hour", "1Day"],
-                index=["1Min", "5Min", "15Min", "1Hour", "1Day"].index(config.BAR_TIMEFRAME),
+                _tf_options,
+                index=_tf_options.index(_tf_saved),
                 format_func=lambda x: {"1Min": "1 Min", "5Min": "5 Min", "15Min": "15 Min", "1Hour": "1 Hour", "1Day": "1 Day"}[x],
                 label_visibility="collapsed",
             )
+            if bar_timeframe != _tf_saved:
+                settings_store.save({"bar_timeframe": bar_timeframe})
 
             auto_refresh = st.toggle("Auto-refresh (30s)", value=False)
             if st.button("Refresh Now", use_container_width=True):
@@ -988,7 +1018,7 @@ def render_overview_panel():
 
         try:
             _bars = broker.get_bars(detail_sym, timeframe=bar_timeframe)
-            _sig = signal_cache.get(detail_sym) or strategy.compute_signals(_bars)
+            _sig = signal_cache.get(detail_sym) or strategy.compute_signals(_bars, timeframe=bar_timeframe)
             _rsi_val = _sig.get("rsi")
             _price_val = _sig.get("price")
 
@@ -1048,7 +1078,7 @@ def render_charts_panel():
     with st.spinner(f"Loading {chart_symbol} bars..."):
         try:
             bars = broker.get_bars(chart_symbol, timeframe=chart_tf)
-            sig = strategy.compute_signals(bars)
+            sig = strategy.compute_signals(bars, timeframe=chart_tf)
             fig = charts.candlestick(bars, chart_symbol, sig)
             fig.update_layout(height=440, margin=dict(l=16, r=16, t=40, b=18))
             st.plotly_chart(fig, use_container_width=True)
@@ -1223,7 +1253,7 @@ def render_events_panel():
                 ev_result = events.get_event_score(event_symbol, run_earnings=run_earnings, run_geo=run_geo, run_macro=run_macro)
             try:
                 _event_bars = broker.get_bars(event_symbol, timeframe=bar_timeframe)
-                quant = strategy.compute_signals(_event_bars)
+                quant = strategy.compute_signals(_event_bars, timeframe=bar_timeframe)
             except Exception:
                 quant = {"score": 0, "reason": "no quant data", "signal": "hold", "rsi": None, "price": None, "atr": None, "event_score": 0, "event_reasons": []}
             combined = strategy.apply_event_score(quant, ev_result)
@@ -1306,6 +1336,31 @@ def render_backtest_panel():
                 wf_m3.metric("Avg Win Rate", f"{wf['avg_win_rate']:.1f}%")
                 wf_m4.metric("Profitable Folds", wf["profitable_folds"])
                 html_table([{k: v for k, v in f.items() if k != "folds"} for f in wf["folds"]], max_height=260)
+
+    with st.expander("Expanding Walk-Forward Validation", expanded=False):
+        st.caption("Training window grows with each fold — mirrors live deployment more realistically than fixed folds.")
+        ewf_c1, ewf_c2, ewf_c3 = st.columns([2, 1, 1])
+        with ewf_c1:
+            ewf_sym = st.selectbox("Symbol", watchlist, key="ewf_sym", label_visibility="collapsed")
+        with ewf_c2:
+            ewf_tf = st.selectbox("Timeframe", ["1Day", "1Hour"], key="ewf_tf", label_visibility="collapsed")
+        with ewf_c3:
+            run_ewf = st.button("Expanding WF", type="primary", use_container_width=True)
+        if run_ewf:
+            with st.spinner(f"Running expanding walk-forward on {ewf_sym}..."):
+                ewf = backtest.walk_forward_expanding(ewf_sym, timeframe=ewf_tf)
+            if "error" in ewf:
+                alert("danger", ewf["error"])
+            else:
+                ewf_m1, ewf_m2, ewf_m3, ewf_m4 = st.columns(4)
+                ewf_m1.metric("Avg OOS Return", f"{ewf['avg_return_pct']:+.2f}%")
+                ewf_m2.metric("Avg Sharpe", ewf["avg_sharpe"])
+                ewf_m3.metric("Avg Win Rate", f"{ewf['avg_win_rate']:.1f}%")
+                ewf_m4.metric("Profitable Folds", ewf["profitable_folds"])
+                html_table(
+                    [{k: v for k, v in f.items() if k not in ("folds",)} for f in ewf["folds"]],
+                    max_height=260,
+                )
 
     with st.expander("Parameter Optimisation", expanded=False):
         st.caption("Searches threshold, stop loss, and take profit combinations ranked by Sharpe ratio.")

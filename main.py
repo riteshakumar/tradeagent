@@ -38,6 +38,7 @@ _curated_blacklist: set[str] = set()   # tickers with bad news today
 _curate_date: date | None = None       # date curation last ran
 _position_stops: dict[str, float] = {} # symbol → per-position stop pct override
 _exit_holds: dict[str, int] = {}       # symbol → consecutive exit-review holds
+_last_rebalance_date: date | None = None
 
 
 def _get_clock():
@@ -50,10 +51,11 @@ def _get_clock():
 def _get_market_trend() -> int:
     """
     Return +1 if SPY is above its 200-day EMA (bull market), -1 if below.
+    Always uses daily bars regardless of strategy timeframe so EMA200 is meaningful.
     Returns 0 (neutral) on any error so trading is never inadvertently blocked.
     """
     try:
-        spy_bars = broker.get_bars("SPY", timeframe=config.BAR_TIMEFRAME)
+        spy_bars = broker.get_bars("SPY", timeframe="1Day", lookback_days=250)
         if not spy_bars or len(spy_bars) < 30:
             return 0
         import pandas as _pd
@@ -61,7 +63,7 @@ def _get_market_trend() -> int:
         ema200 = closes.ewm(span=200, adjust=False).mean()
         return 1 if float(closes.iloc[-1]) >= float(ema200.iloc[-1]) else -1
     except Exception as exc:
-        log.debug("SPY market trend check failed: %s", exc)
+        log.warning("SPY market trend check failed: %s", exc)
         return 0
 
 
@@ -100,7 +102,7 @@ def _rank_by_relative_strength(watchlist: list[str]) -> list[str]:
                  [(s, f"{rs:+.1%}") for s, rs in ranked[:n]])
         return selected
     except Exception as exc:
-        log.debug("RS ranking failed: %s", exc)
+        log.warning("RS ranking failed — using original order: %s", exc)
         return watchlist
 
 
@@ -169,7 +171,7 @@ def _check_higher_tf(symbol: str, current_signal: str, market_trend: int) -> tup
         bars = broker.get_bars(symbol, timeframe=higher_tf, lookback_days=90)
         if not bars or len(bars) < 30:
             return True, f"insufficient {higher_tf} data"
-        htf_sig = strategy.compute_signals(bars, market_trend=market_trend)
+        htf_sig = strategy.compute_signals(bars, market_trend=market_trend, timeframe=higher_tf)
         htf = htf_sig["signal"]
         if current_signal == "buy" and htf == "sell":
             return False, f"counter-trend: {higher_tf} is SELL (score {htf_sig['score']})"
@@ -177,7 +179,7 @@ def _check_higher_tf(symbol: str, current_signal: str, market_trend: int) -> tup
             return False, f"counter-trend: {higher_tf} is BUY (score {htf_sig['score']})"
         return True, f"{higher_tf} confluence: {htf.upper()}"
     except Exception as exc:
-        log.debug("Higher-TF check failed for %s: %s", symbol, exc)
+        log.warning("Higher-TF check failed for %s — proceeding without filter: %s", symbol, exc)
         return True, "higher-tf check unavailable"
 
 
@@ -193,7 +195,7 @@ def _check_peers(symbol: str, market_trend: int) -> tuple[bool, str]:
         try:
             bars = broker.get_bars(peer, timeframe="1Day", lookback_days=30)
             if bars and len(bars) >= 5:
-                sig = strategy.compute_signals(bars, market_trend=market_trend)
+                sig = strategy.compute_signals(bars, market_trend=market_trend, timeframe="1Day")
                 if sig["signal"] == "sell":
                     sell_count += 1
         except Exception:
@@ -316,7 +318,7 @@ def _check_sl_tp(position: dict) -> bool:
         if holds < config.MAX_EXIT_HOLDS:
             try:
                 bars = broker.get_bars(symbol, timeframe="1Day", lookback_days=10)
-                review_sig = strategy.compute_signals(bars) if bars else {}
+                review_sig = strategy.compute_signals(bars, timeframe=config.BAR_TIMEFRAME) if bars else {}
                 review_sig = _enrich_signal(symbol, review_sig)
                 review_sig["signal"] = "sell"   # context: we're reviewing an exit
                 result = agent.evaluate_signal(symbol, review_sig, use_cache=False)
@@ -331,7 +333,7 @@ def _check_sl_tp(position: dict) -> bool:
                 else:
                     _exit_holds[symbol] = 0
             except Exception as exc:
-                log.debug("%s: exit review error — %s", symbol, exc)
+                log.warning("%s: exit review error — %s", symbol, exc)
         else:
             _exit_holds[symbol] = 0   # max holds exhausted, proceed with stop
 
@@ -459,7 +461,22 @@ def _place_buy(symbol: str, sig: dict, account: dict, positions: list[dict], wat
         log.info("[DRY RUN] Would BUY %s x %s @ $%.2f score=%s", qty, symbol, sig["price"], sig["score"])
         return True
 
-    order = broker.place_market_order(symbol, qty, "buy")
+    # Re-fetch account at submission time — agent call may take several seconds,
+    # buying power could have changed.
+    fresh_account = broker.get_account()
+    if not risk.check_buying_power(sig["price"], qty, fresh_account):
+        # Attempt reduced qty using fresh buying power
+        qty = max(1.0, round(float(fresh_account["buying_power"]) * 0.95 / sig["price"], 0))
+        if not risk.check_buying_power(sig["price"], qty, fresh_account):
+            log.warning("%s: insufficient buying power at submission — skipping", symbol)
+            return False
+
+    if config.ENABLE_ORDER_SLICING and qty > config.ORDER_SLICE_MAX_QTY:
+        orders = broker.place_sliced_order(symbol, qty, "buy")
+        order = orders[0]
+        log.info("BUY sliced into %d orders for %s", len(orders), symbol)
+    else:
+        order = broker.place_market_order(symbol, qty, "buy")
     risk.record_order(symbol)
     trade_journal.log_decision(
         symbol, sig["signal"], True, reason,
@@ -520,7 +537,20 @@ def _place_short(symbol: str, sig: dict, account: dict, positions: list[dict], w
         log.info("[DRY RUN] Would SHORT %s x %s @ $%.2f score=%s", qty, symbol, sig["price"], sig["score"])
         return True
 
-    order = broker.place_market_order(symbol, qty, "sell")
+    # Re-fetch account at submission time — agent call may take several seconds.
+    fresh_account = broker.get_account()
+    if not risk.check_buying_power(sig["price"], qty, fresh_account):
+        qty = max(1.0, round(float(fresh_account["buying_power"]) * 0.95 / sig["price"], 0))
+        if not risk.check_buying_power(sig["price"], qty, fresh_account):
+            log.warning("%s: insufficient buying power at short submission — skipping", symbol)
+            return False
+
+    if config.ENABLE_ORDER_SLICING and qty > config.ORDER_SLICE_MAX_QTY:
+        orders = broker.place_sliced_order(symbol, qty, "sell")
+        order = orders[0]
+        log.info("SHORT sliced into %d orders for %s", len(orders), symbol)
+    else:
+        order = broker.place_market_order(symbol, qty, "sell")
     risk.record_order(symbol)
     trade_journal.log_decision(
         symbol, sig["signal"], True, reason,
@@ -618,7 +648,7 @@ def _maybe_run_events(symbol: str, sig: dict) -> dict:
         has_earnings = any(
             any(kw in n["headline"].lower() for kw in ("earnings", "eps", "guidance", "beat", "miss"))
             for n in news
-            if n["headline"] and "[news fetch error" not in n["headline"]
+            if n.get("headline")
         )
         if has_earnings:
             log.info("%s: earnings news detected - running event analysis", symbol)
@@ -628,6 +658,61 @@ def _maybe_run_events(symbol: str, sig: dict) -> dict:
     except Exception as exc:
         log.debug("%s: event check skipped - %s", symbol, exc)
     return sig
+
+
+def _apply_signal_filters(symbol: str, sig: dict, bars: list[dict], market_trend: int) -> dict:
+    """
+    Apply entry filters to an active (buy/sell) signal.
+    Returns sig with signal possibly downgraded to "hold".
+    Mutates sig["peer_consensus"] as a side-effect.
+    """
+    sig = _enrich_signal(symbol, sig)
+
+    # Time-of-day filter (buys only)
+    tod_ok, tod_reason = risk.check_time_of_day()
+    if not tod_ok and sig["signal"] == "buy":
+        log.info("%s: buy blocked — %s", symbol, tod_reason)
+        sig["signal"] = "hold"
+
+    # Gap filter (buys only)
+    gap_ok, gap_reason = risk.check_gap(bars)
+    if not gap_ok and sig["signal"] == "buy":
+        log.info("%s: buy blocked — %s", symbol, gap_reason)
+        sig["signal"] = "hold"
+
+    # Multi-timeframe confluence (buy + sell)
+    if sig["signal"] in ("buy", "sell"):
+        tf_ok, tf_reason = _check_higher_tf(symbol, sig["signal"], market_trend)
+        if not tf_ok:
+            log.info("%s: blocked — %s", symbol, tf_reason)
+            sig["signal"] = "hold"
+
+    # Peer consensus (buys only)
+    if sig["signal"] == "buy":
+        peer_ok, peer_reason = _check_peers(symbol, market_trend)
+        sig["peer_consensus"] = peer_ok
+        if not peer_ok:
+            log.info("%s: buy blocked — %s", symbol, peer_reason)
+            sig["signal"] = "hold"
+
+    return sig
+
+
+def _execute_signal(symbol: str, sig: dict, account: dict, positions: list[dict], watchlist: list[str]) -> None:
+    """Route approved signal to the correct buy/sell/short execution path."""
+    if sig["signal"] == "buy":
+        changed = _close_short(symbol, sig, positions)
+        if changed:
+            account   = broker.get_account()
+            positions = _current_positions()
+        _place_buy(symbol, sig, account, positions, watchlist)
+
+    elif sig["signal"] == "sell":
+        changed = _close_long(symbol, sig, positions, watchlist)
+        if changed:
+            account   = broker.get_account()
+            positions = _current_positions()
+        _place_short(symbol, sig, account, positions, watchlist)
 
 
 def _process_symbol(symbol: str, watchlist: list[str], market_trend: int = 0) -> None:
@@ -647,39 +732,16 @@ def _process_symbol(symbol: str, watchlist: list[str], market_trend: int = 0) ->
     if earnings_soon:
         log.info("%s: earnings period detected - buy suppressed", symbol)
 
-    sig = strategy.compute_signals(bars, market_trend=market_trend, earnings_soon=earnings_soon)
+    sig = strategy.compute_signals(
+        bars,
+        market_trend=market_trend,
+        earnings_soon=earnings_soon,
+        timeframe=config.BAR_TIMEFRAME,
+    )
     sig = _maybe_run_events(symbol, sig)
 
     if sig["signal"] in ("buy", "sell"):
-        # Enrich with news sentiment + macro context before agent sees it
-        sig = _enrich_signal(symbol, sig)
-
-        # Time-of-day filter
-        tod_ok, tod_reason = risk.check_time_of_day()
-        if not tod_ok and sig["signal"] == "buy":
-            log.info("%s: buy blocked — %s", symbol, tod_reason)
-            sig["signal"] = "hold"
-
-        # Gap filter
-        gap_ok, gap_reason = risk.check_gap(bars)
-        if not gap_ok and sig["signal"] == "buy":
-            log.info("%s: buy blocked — %s", symbol, gap_reason)
-            sig["signal"] = "hold"
-
-        # Multi-timeframe confluence
-        if sig["signal"] in ("buy", "sell"):
-            tf_ok, tf_reason = _check_higher_tf(symbol, sig["signal"], market_trend)
-            if not tf_ok:
-                log.info("%s: blocked — %s", symbol, tf_reason)
-                sig["signal"] = "hold"
-
-        # Peer check (buy only — don't block sells)
-        if sig["signal"] == "buy":
-            peer_ok, peer_reason = _check_peers(symbol, market_trend)
-            sig["peer_consensus"] = peer_ok
-            if not peer_ok:
-                log.info("%s: buy blocked — %s", symbol, peer_reason)
-                sig["signal"] = "hold"
+        sig = _apply_signal_filters(symbol, sig, bars, market_trend)
 
     if config.SHADOW_MODE and sig.get("price"):
         shadow_book.update_mark(symbol, sig["price"])
@@ -696,19 +758,7 @@ def _process_symbol(symbol: str, watchlist: list[str], market_trend: int = 0) ->
         sig["reason"],
     )
 
-    if sig["signal"] == "buy":
-        changed = _close_short(symbol, sig, positions)
-        if changed:
-            account   = broker.get_account()
-            positions = _current_positions()
-        _place_buy(symbol, sig, account, positions, watchlist)
-
-    elif sig["signal"] == "sell":
-        changed = _close_long(symbol, sig, positions, watchlist)
-        if changed:
-            account   = broker.get_account()
-            positions = _current_positions()
-        _place_short(symbol, sig, account, positions, watchlist)
+    _execute_signal(symbol, sig, account, positions, watchlist)
 
 
 def get_active_watchlist() -> list[str]:
@@ -734,6 +784,77 @@ def get_active_watchlist() -> list[str]:
     return list(dict.fromkeys(dynamic + stored))
 
 
+def _maybe_rebalance(account: dict, positions: list[dict]) -> None:
+    """
+    Equal-weight rebalance: trim any position whose portfolio weight exceeds
+    the equal-weight target by more than REBALANCE_DRIFT_THRESHOLD.
+    Runs at most once per REBALANCE_INTERVAL_DAYS.
+    Only fires in live/shadow mode (skipped in DRY_RUN).
+    """
+    global _last_rebalance_date
+    if config.REBALANCE_INTERVAL_DAYS <= 0:
+        return
+
+    today = datetime.now(timezone.utc).date()
+    if _last_rebalance_date is not None:
+        days_since = (today - _last_rebalance_date).days
+        if days_since < config.REBALANCE_INTERVAL_DAYS:
+            return
+
+    if not positions:
+        return
+
+    portfolio_value = float(account["portfolio_value"])
+    if portfolio_value <= 0:
+        return
+
+    n = len(positions)
+    equal_weight = 1.0 / n
+    trimmed: list[str] = []
+
+    for pos in positions:
+        symbol = pos["symbol"]
+        notional = float(pos.get("market_value", 0))
+        weight = notional / portfolio_value
+        drift = weight - equal_weight
+        if drift > config.REBALANCE_DRIFT_THRESHOLD:
+            # Trim excess — sell the over-weight fraction
+            excess_notional = drift * portfolio_value
+            price = float(pos.get("current_price", 0))
+            if price <= 0:
+                continue
+            trim_qty = max(1.0, round(excess_notional / price, 0))
+            current_qty = float(pos.get("qty", 0))
+            trim_qty = min(trim_qty, current_qty - 1)  # keep at least 1 share
+            if trim_qty < 1:
+                continue
+            log.info(
+                "REBALANCE trim %s: weight=%.1f%% target=%.1f%% drift=%.1f%% → sell %.0f shares",
+                symbol, weight * 100, equal_weight * 100, drift * 100, trim_qty,
+            )
+            if config.DRY_RUN:
+                log.info("[DRY RUN] Would trim %s x%.0f", symbol, trim_qty)
+            elif config.SHADOW_MODE:
+                log.info("[SHADOW] Rebalance trim %s x%.0f", symbol, trim_qty)
+            else:
+                try:
+                    order = broker.place_market_order(symbol, trim_qty, "sell")
+                    risk.record_order(symbol)
+                    log.info("Rebalance sell order: %s", order)
+                    trimmed.append(symbol)
+                except Exception as exc:
+                    log.error("Rebalance sell failed for %s: %s", symbol, exc)
+
+    _last_rebalance_date = today
+    if trimmed:
+        alerts.send(
+            "Portfolio Rebalanced",
+            f"Trimmed over-weight positions: {', '.join(trimmed)}",
+        )
+    else:
+        log.info("Rebalance check: no positions exceeded drift threshold (%.0f%%)", config.REBALANCE_DRIFT_THRESHOLD * 100)
+
+
 def run_once() -> None:
     log.info("=== Tick start ===")
     _load_runtime_overrides()
@@ -755,6 +876,8 @@ def run_once() -> None:
     positions = _current_positions()
     log.info("Account: equity=$%.2f cash=$%.2f", account["equity"], account["cash"])
     log.info("Open positions: %s", [f"{p['symbol']}:{p.get('side','long')}" for p in positions])
+
+    _maybe_rebalance(account, positions)
 
     watchlist = get_active_watchlist()
     watchlist = _rank_by_relative_strength(watchlist)  # trade only top RS symbols

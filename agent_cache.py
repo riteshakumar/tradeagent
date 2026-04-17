@@ -1,7 +1,9 @@
 """
-LLM result cache — keyed on (symbol, signal, score).
+LLM result cache — keyed on (symbol, full-signal-hash).
 Entries expire after AGENT_CACHE_TTL_SEC.
 """
+import hashlib
+import json
 import time
 import config
 
@@ -10,7 +12,10 @@ _store: dict[str, tuple[float, dict]] = {}   # key → (ts, result_dict)
 
 
 def _key(symbol: str, signal: dict) -> str:
-    return f"{symbol}:{signal.get('signal')}:{signal.get('score')}"
+    # Hash the full signal dict so different signals never collide on same score
+    payload = json.dumps(signal, sort_keys=True, default=str)
+    h = hashlib.md5(payload.encode()).hexdigest()
+    return f"{symbol}:{h}"
 
 
 def get(symbol: str, signal: dict) -> dict | None:

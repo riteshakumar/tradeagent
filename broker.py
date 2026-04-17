@@ -5,8 +5,14 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from datetime import datetime, timedelta
+import logging
+import time
+
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+
 import config
 
+log = logging.getLogger(__name__)
 
 _trading = TradingClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY, paper=config.PAPER_TRADING)
 _data = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
@@ -20,7 +26,17 @@ _TIMEFRAME_MAP = {
     "1Day":  (TimeFrame.Day,                        timedelta(days=60)),
 }
 
+# Retry config for read-only API calls: 3 attempts, 2–30s exponential backoff.
+# NOT applied to place_market_order / close_position (would risk double-fills).
+_READ_RETRY = dict(
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    stop=stop_after_attempt(3),
+    retry=retry_if_exception_type(Exception),
+    reraise=True,
+)
 
+
+@retry(**_READ_RETRY)
 def get_account() -> dict:
     acc = _trading.get_account()
     return {
@@ -31,6 +47,7 @@ def get_account() -> dict:
     }
 
 
+@retry(**_READ_RETRY)
 def get_positions() -> list[dict]:
     positions = _trading.get_all_positions()
     rows: list[dict] = []
@@ -52,6 +69,7 @@ def get_positions() -> list[dict]:
     return rows
 
 
+@retry(**_READ_RETRY)
 def get_bars(symbol: str, timeframe: str | None = None, lookback_days: int | None = None) -> list[dict]:
     tf_key = timeframe or config.BAR_TIMEFRAME
     tf, default_lookback = _TIMEFRAME_MAP.get(tf_key, _TIMEFRAME_MAP["5Min"])
@@ -69,6 +87,7 @@ def get_bars(symbol: str, timeframe: str | None = None, lookback_days: int | Non
 
 
 def place_market_order(symbol: str, qty: float, side: str) -> dict:
+    # No retry — retrying order submission risks double-fills.
     req = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -79,6 +98,7 @@ def place_market_order(symbol: str, qty: float, side: str) -> dict:
     return {"id": str(order.id), "symbol": symbol, "qty": qty, "side": side, "status": str(order.status)}
 
 
+@retry(**_READ_RETRY)
 def get_orders(limit: int = 20) -> list[dict]:
     from alpaca.trading.requests import GetOrdersRequest
     from alpaca.trading.enums import QueryOrderStatus
@@ -99,11 +119,46 @@ def get_orders(limit: int = 20) -> list[dict]:
     ]
 
 
+def place_sliced_order(
+    symbol: str,
+    qty: float,
+    side: str,
+    max_slice_qty: int | None = None,
+    delay_sec: float | None = None,
+) -> list[dict]:
+    """TWAP-style slicer: submits qty in chunks to reduce market impact.
+    No retry — retrying sliced orders risks over-fills.
+    """
+    slice_size = float(max_slice_qty or config.ORDER_SLICE_MAX_QTY)
+    delay = delay_sec if delay_sec is not None else config.ORDER_SLICE_DELAY_SEC
+    remaining = float(qty)
+    orders: list[dict] = []
+    while remaining > 0:
+        this_slice = min(remaining, slice_size)
+        order = place_market_order(symbol, this_slice, side)
+        orders.append(order)
+        remaining -= this_slice
+        log.info(
+            "Slice %d/%d: %s %s x%.0f (%.0f remaining)",
+            len(orders),
+            int(qty / slice_size) + (1 if qty % slice_size else 0),
+            side,
+            symbol,
+            this_slice,
+            remaining,
+        )
+        if remaining > 0:
+            time.sleep(delay)
+    return orders
+
+
 def close_position(symbol: str) -> dict:
+    # No retry — closing the same position twice would flip the side.
     resp = _trading.close_position(symbol)
     return {"symbol": symbol, "status": "closed", "order_id": str(resp.id)}
 
 
+@retry(**_READ_RETRY)
 def get_position(symbol: str) -> dict | None:
     """Return single position dict or None if not held."""
     try:
