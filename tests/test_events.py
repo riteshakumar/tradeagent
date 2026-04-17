@@ -7,8 +7,8 @@ import config
 import events
 
 
-def _make_news(*headlines: str) -> list[dict]:
-    return [{"headline": h, "summary": "", "source": "", "created": "", "symbols": []} for h in headlines]
+def _make_news(*headlines: str, created: str = "") -> list[dict]:
+    return [{"headline": h, "summary": "", "source": "", "created": created, "symbols": []} for h in headlines]
 
 
 # ── sentiment_trend ────────────────────────────────────────────────────────────
@@ -104,3 +104,44 @@ def test_earnings_period_false_on_normal_news():
 def test_earnings_period_false_on_api_error():
     with patch.object(events, "fetch_news", side_effect=Exception("timeout")):
         assert events.is_earnings_period("AAPL") is False
+
+
+def test_is_earnings_period_from_news_respects_as_of_window():
+    news = _make_news(
+        "AAPL reports earnings on Thursday - analysts expect a beat",
+        created="2026-01-01T12:00:00Z",
+    )
+
+    assert events.is_earnings_period_from_news(news, as_of="2026-01-05T12:00:00Z", pre_days=5) is True
+    assert events.is_earnings_period_from_news(news, as_of="2026-01-10T12:00:00Z", pre_days=5) is False
+
+
+def test_get_historical_event_score_ignores_future_headlines():
+    news = [
+        {
+            "headline": "AAPL misses earnings and cuts guidance",
+            "summary": "",
+            "source": "",
+            "created": "2026-01-05T12:00:00Z",
+            "symbols": ["AAPL"],
+        },
+        {
+            "headline": "AAPL beats earnings and raises guidance",
+            "summary": "",
+            "source": "",
+            "created": "2026-01-07T12:00:00Z",
+            "symbols": ["AAPL"],
+        },
+    ]
+
+    past_only = events.get_historical_event_score(
+        "AAPL",
+        news,
+        as_of="2026-01-06T12:00:00Z",
+        run_earnings=True,
+        run_geo=False,
+        run_macro=False,
+    )
+
+    assert past_only["event_score"] < 0
+    assert any("earnings" in reason for reason in past_only["event_reasons"])

@@ -708,13 +708,14 @@ def compute_signals(
     }
 
 
-def apply_event_score(quant: dict, event: dict) -> dict:
+def apply_event_score(quant: dict, event: dict, threshold: int | None = None) -> dict:
     no_signal = "no strong signal"
     combined  = quant["score"] + event["event_score"]
     base      = [] if quant["reason"] == no_signal else [quant["reason"]]
     all_reasons = base + event["event_reasons"]
 
-    t = config.SIGNAL_THRESHOLD
+    timeframe = str(quant.get("timeframe") or "1Day")
+    t = _resolve_signal_threshold(timeframe, threshold)
     if combined >= t:
         signal = "buy"
     elif combined <= -t:
@@ -722,7 +723,11 @@ def apply_event_score(quant: dict, event: dict) -> dict:
     else:
         signal = "hold"
 
+    if signal == "buy" and "[buy suppressed:" in str(quant.get("reason") or ""):
+        signal = "hold"
     if quant.get("market_trend") == -1 and signal == "buy":
+        signal = "hold"
+    if quant.get("earnings_soon") and signal == "buy":
         signal = "hold"
 
     return {

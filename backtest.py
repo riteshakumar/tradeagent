@@ -15,6 +15,7 @@ import pandas as pd
 
 import broker
 import config
+import events
 import risk
 import strategy
 
@@ -351,6 +352,65 @@ def _build_filter_context(
     return context
 
 
+def _normalize_news_timestamp(value: object) -> pd.Timestamp | None:
+    if value in (None, ""):
+        return None
+    ts = pd.to_datetime(value, utc=True, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return ts.tz_convert("UTC").tz_localize(None)
+
+
+def _build_event_context(symbol: str, df: pd.DataFrame) -> dict:
+    if not config.USE_AGENT or df.empty:
+        return {}
+
+    start_ts = pd.Timestamp(df["t"].iloc[0]) - pd.Timedelta(days=7)
+    end_ts = pd.Timestamp(df["t"].iloc[-1]) + pd.Timedelta(days=1)
+    try:
+        raw_news = events.fetch_news_range(
+            symbols=[symbol],
+            keywords="earnings report quarterly results EPS guidance beat miss forecast",
+            start=start_ts.isoformat(),
+            end=end_ts.isoformat(),
+            sort="asc",
+            max_items=max(50, min(500, len(df) * 2)),
+        )
+    except Exception:
+        return {}
+
+    stamped_news: list[tuple[pd.Timestamp, dict]] = []
+    for item in raw_news:
+        created_ts = _normalize_news_timestamp(item.get("created"))
+        if created_ts is None:
+            continue
+        stamped_news.append((created_ts, item))
+
+    if not stamped_news:
+        return {}
+
+    stamped_news.sort(key=lambda item: item[0])
+    return {
+        "earnings_news_times": [ts for ts, _ in stamped_news],
+        "earnings_news": [item for _, item in stamped_news],
+    }
+
+
+def _historical_news_before(event_context: dict[str, object] | None, ts: pd.Timestamp) -> list[dict]:
+    if not event_context:
+        return []
+    news_times = event_context.get("earnings_news_times", [])
+    earnings_news = event_context.get("earnings_news", [])
+    if not news_times or not earnings_news:
+        return []
+
+    ts_value = pd.Timestamp(ts)
+    if ts_value.tzinfo is not None:
+        ts_value = ts_value.tz_convert("UTC").tz_localize(None)
+    idx = bisect_left(news_times, ts_value)
+    return earnings_news[:idx]
+
+
 def _apply_historical_signal_filters(
     signal: str,
     window: pd.DataFrame,
@@ -410,6 +470,7 @@ def _simulate(
     warmup_override: int | None = None,
     market_trend_by_date: dict[str, int] | None = None,
     filter_context: dict[str, object] | None = None,
+    event_context: dict[str, object] | None = None,
 ) -> tuple[list[dict], list[dict], float]:
     """
     Simulate trades on df.
@@ -491,12 +552,26 @@ def _simulate(
             equity_curve.append({"date": ts, "equity": round(cash, 2)})
             continue
 
+        historical_news = _historical_news_before(event_context, pd.Timestamp(bar["t"]))
+        earnings_soon = events.is_earnings_period_from_news(historical_news, as_of=bar["t"]) if historical_news else False
+
         sig = strategy.compute_signals(
             window.to_dict("records"),
             market_trend=mt,
+            earnings_soon=earnings_soon,
             threshold=threshold,
             timeframe=timeframe,
         )
+        if historical_news and events.has_earnings_news(historical_news, as_of=bar["t"]):
+            event_result = events.get_historical_event_score(
+                symbol,
+                historical_news,
+                as_of=bar["t"],
+                run_earnings=True,
+                run_geo=False,
+                run_macro=False,
+            )
+            sig = strategy.apply_event_score(sig, event_result, threshold=threshold)
         signal = sig.get("signal") or _signal_for_threshold(int(sig.get("score") or 0), threshold)
         signal = _apply_historical_signal_filters(signal, window, bar, timeframe, filter_context=filter_context)
 
@@ -688,6 +763,7 @@ def _evaluate_parameters(
     take_profit_pct: float,
     market_trend_by_date: dict[str, int] | None = None,
     filter_context: dict[str, object] | None = None,
+    event_context: dict[str, object] | None = None,
     warmup_override: int | None = None,
 ) -> dict:
     trades, equity_curve, final_equity = _simulate(
@@ -703,6 +779,7 @@ def _evaluate_parameters(
         warmup_override=warmup_override,
         market_trend_by_date=market_trend_by_date,
         filter_context=filter_context,
+        event_context=event_context,
     )
     stats = _compute_stats(trades, initial_cash, final_equity, equity_curve, timeframe=timeframe)
     return {
@@ -724,6 +801,7 @@ def _select_training_parameters(
     initial_cash: float,
     market_trend_by_date: dict[str, int] | None = None,
     filter_context: dict[str, object] | None = None,
+    event_context: dict[str, object] | None = None,
 ) -> dict | None:
     min_trades = _min_trades_for_timeframe(timeframe, len(train_df))
     candidates: list[dict] = []
@@ -738,6 +816,7 @@ def _select_training_parameters(
             take_profit_pct=tp,
             market_trend_by_date=market_trend_by_date,
             filter_context=filter_context,
+            event_context=event_context,
         )
         if candidate["trades"] >= min_trades:
             candidates.append(candidate)
@@ -755,6 +834,7 @@ def _select_training_parameters(
                     take_profit_pct=tp,
                     market_trend_by_date=market_trend_by_date,
                     filter_context=filter_context,
+                    event_context=event_context,
                 )
             )
 
@@ -788,6 +868,7 @@ def run(
     # Pre-build SPY trend dict for market regime gate (skip SPY itself)
     spy_trend = _build_spy_trend(timeframe, days) if symbol != "SPY" else {}
     filter_context = _build_filter_context(symbol, timeframe, days, df, market_trend_by_date=spy_trend)
+    event_context = _build_event_context(symbol, df)
 
     result = _evaluate_parameters(
         df=df,
@@ -799,6 +880,7 @@ def run(
         take_profit_pct=config.TAKE_PROFIT_PCT,
         market_trend_by_date=spy_trend,
         filter_context=filter_context,
+        event_context=event_context,
     )
     benchmark = _spy_benchmark(timeframe, days, initial_cash)
 
@@ -837,6 +919,7 @@ def walk_forward(
 
     spy_trend = _build_spy_trend(timeframe, lookback_days) if symbol != "SPY" else {}
     filter_context = _build_filter_context(symbol, timeframe, lookback_days, df, market_trend_by_date=spy_trend)
+    event_context = _build_event_context(symbol, df)
 
     fold_size = n // n_splits
     folds = []
@@ -859,6 +942,7 @@ def walk_forward(
             initial_cash=initial_cash,
             market_trend_by_date=spy_trend,
             filter_context=filter_context,
+            event_context=event_context,
         )
         if not best_params:
             continue
@@ -873,6 +957,7 @@ def walk_forward(
             take_profit_pct=best_params["take_profit_pct"],
             market_trend_by_date=spy_trend,
             filter_context=filter_context,
+            event_context=event_context,
             warmup_override=split,
         )
         folds.append(
@@ -944,6 +1029,7 @@ def walk_forward_expanding(
 
     spy_trend = _build_spy_trend(timeframe, lookback_days) if symbol != "SPY" else {}
     filter_context = _build_filter_context(symbol, timeframe, lookback_days, df, market_trend_by_date=spy_trend)
+    event_context = _build_event_context(symbol, df)
 
     min_train = max(20, int(n * min_train_pct))
     remaining = n - min_train
@@ -966,6 +1052,7 @@ def walk_forward_expanding(
             initial_cash=initial_cash,
             market_trend_by_date=spy_trend,
             filter_context=filter_context,
+            event_context=event_context,
         )
         if not best_params:
             break
@@ -980,6 +1067,7 @@ def walk_forward_expanding(
             take_profit_pct=best_params["take_profit_pct"],
             market_trend_by_date=spy_trend,
             filter_context=filter_context,
+            event_context=event_context,
             warmup_override=train_end,
         )
         folds.append({
@@ -1043,6 +1131,7 @@ def optimize(
 
     spy_trend = _build_spy_trend(timeframe, lookback_days) if symbol != "SPY" else {}
     filter_context = _build_filter_context(symbol, timeframe, lookback_days, df, market_trend_by_date=spy_trend)
+    event_context = _build_event_context(symbol, df)
     split = max(30, int(len(df) * 0.7))
     if len(df) - split < 5:
         return {"error": "Need more data for train/validation optimisation split."}
@@ -1062,6 +1151,7 @@ def optimize(
             take_profit_pct=tp,
             market_trend_by_date=spy_trend,
             filter_context=filter_context,
+            event_context=event_context,
         )
         if train_result["trades"] < min_train_trades:
             continue
@@ -1076,6 +1166,7 @@ def optimize(
             take_profit_pct=tp,
             market_trend_by_date=spy_trend,
             filter_context=filter_context,
+            event_context=event_context,
             warmup_override=split,
         )
         if validation_result["trades"] < min_validation_trades:

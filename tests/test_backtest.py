@@ -384,6 +384,156 @@ def test_equity_curve_includes_final_liquidation_equity(monkeypatch):
     assert equity_curve[-1]["equity"] == round(final_equity, 2)
 
 
+def test_simulate_passes_historical_earnings_period_to_strategy(monkeypatch):
+    start = datetime(2026, 1, 1)
+    rows = [
+        {"t": start + timedelta(days=i), "o": 100.0, "h": 100.0, "l": 100.0, "c": 100.0, "v": 1_000_000}
+        for i in range(32)
+    ]
+    df = pd.DataFrame(rows)
+    observed = {"earnings_soon": False}
+
+    def _earnings_sensitive(
+        _bars: list[dict],
+        market_trend: int = 0,
+        earnings_soon: bool = False,
+        threshold: int | None = None,
+        timeframe: str | None = None,
+    ) -> dict:
+        observed["earnings_soon"] = earnings_soon
+        return {
+            "signal": "hold" if earnings_soon else "buy",
+            "score": 10 if not earnings_soon else 0,
+            "reason": "earnings gate",
+            "rsi": 50,
+            "price": 100,
+            "atr": 1,
+            "event_score": 0,
+            "event_reasons": [],
+            "regime": "bull_trend",
+            "regime_confidence": 1.0,
+            "timeframe": timeframe or "1Day",
+            "market_trend": market_trend,
+            "earnings_soon": earnings_soon,
+        }
+
+    monkeypatch.setattr(backtest.strategy, "compute_signals", _earnings_sensitive)
+
+    event_context = {
+        "earnings_news": [
+            {
+                "headline": "AAPL reports earnings on Thursday",
+                "summary": "",
+                "source": "",
+                "created": "2026-01-30T12:00:00Z",
+                "symbols": ["AAPL"],
+            }
+        ],
+        "earnings_news_times": [pd.Timestamp("2026-01-30T12:00:00")],
+    }
+
+    trades, _, final_equity = backtest._simulate(
+        df=df,
+        symbol="AAPL",
+        timeframe="1Day",
+        initial_cash=100_000,
+        threshold=3,
+        stop_loss_pct=0.0,
+        take_profit_pct=0.0,
+        slippage_bps=0.0,
+        fee_per_trade=0.0,
+        warmup_override=30,
+        event_context=event_context,
+    )
+
+    assert observed["earnings_soon"] is True
+    assert trades == []
+    assert final_equity == 100_000
+
+
+def test_simulate_replays_historical_event_score_without_lookahead(monkeypatch):
+    monkeypatch.setattr(config, "MAX_POSITION_PCT", 0.5)
+
+    start = datetime(2026, 1, 1)
+    rows = [
+        {"t": start + timedelta(days=i), "o": 100.0, "h": 100.0, "l": 100.0, "c": 100.0, "v": 1_000_000}
+        for i in range(33)
+    ]
+    df = pd.DataFrame(rows)
+
+    def _base_signal(
+        _bars: list[dict],
+        market_trend: int = 0,
+        earnings_soon: bool = False,
+        threshold: int | None = None,
+        timeframe: str | None = None,
+    ) -> dict:
+        if len(_bars) <= 30:
+            signal = "buy"
+            score = 5
+        else:
+            signal = "hold"
+            score = 0
+        return {
+            "signal": signal,
+            "score": score,
+            "reason": "base",
+            "rsi": 50,
+            "price": 100,
+            "atr": 1,
+            "event_score": 0,
+            "event_reasons": [],
+            "regime": "bull_trend",
+            "regime_confidence": 1.0,
+            "timeframe": timeframe or "1Day",
+            "market_trend": market_trend,
+            "earnings_soon": earnings_soon,
+        }
+
+    monkeypatch.setattr(backtest.strategy, "compute_signals", _base_signal)
+
+    event_context = {
+        "earnings_news": [
+            {
+                "headline": "AAPL misses earnings and cuts guidance",
+                "summary": "",
+                "source": "",
+                "created": "2026-01-31T12:00:00Z",
+                "symbols": ["AAPL"],
+            },
+            {
+                "headline": "AAPL beats earnings and raises guidance",
+                "summary": "",
+                "source": "",
+                "created": "2026-02-10T12:00:00Z",
+                "symbols": ["AAPL"],
+            },
+        ],
+        "earnings_news_times": [
+            pd.Timestamp("2026-01-31T12:00:00"),
+            pd.Timestamp("2026-02-10T12:00:00"),
+        ],
+    }
+
+    trades, _, _ = backtest._simulate(
+        df=df,
+        symbol="AAPL",
+        timeframe="1Day",
+        initial_cash=100_000,
+        threshold=2,
+        stop_loss_pct=0.0,
+        take_profit_pct=0.0,
+        slippage_bps=0.0,
+        fee_per_trade=0.0,
+        warmup_override=30,
+        event_context=event_context,
+    )
+
+    assert len(trades) == 1
+    assert trades[0]["exit_reason"] == "signal_exit"
+    assert trades[0]["exit_date"].startswith("2026-02-01")
+
+
 def test_select_training_parameters_respects_trade_floor(monkeypatch):
     monkeypatch.setattr(backtest, "_parameter_grid", lambda: [(2, 0.02, 0.05), (3, 0.05, 0.10)])
 
@@ -397,6 +547,7 @@ def test_select_training_parameters_respects_trade_floor(monkeypatch):
         take_profit_pct,
         market_trend_by_date=None,
         filter_context=None,
+        event_context=None,
         warmup_override=None,
     ):
         if threshold == 2:
@@ -437,6 +588,7 @@ def test_optimize_ranks_on_validation_not_training(monkeypatch):
     ]
     monkeypatch.setattr(backtest.broker, "get_bars", lambda *args, **kwargs: bars)
     monkeypatch.setattr(backtest, "_build_filter_context", lambda *args, **kwargs: {})
+    monkeypatch.setattr(backtest, "_build_event_context", lambda *args, **kwargs: {})
     monkeypatch.setattr(backtest, "_parameter_grid", lambda: [(2, 0.02, 0.05), (3, 0.05, 0.10)])
 
     def _fake_eval(
@@ -449,6 +601,7 @@ def test_optimize_ranks_on_validation_not_training(monkeypatch):
         take_profit_pct,
         market_trend_by_date=None,
         filter_context=None,
+        event_context=None,
         warmup_override=None,
     ):
         if warmup_override is None:

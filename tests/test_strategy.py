@@ -55,12 +55,57 @@ def test_apply_event_score_preserves_regime_keys(monkeypatch):
         "regime_confidence": 0.5,
         "event_score": 0,
         "event_reasons": [],
+        "timeframe": "1Day",
+        "market_trend": 0,
+        "earnings_soon": False,
     }
     event = {"event_score": 2, "event_reasons": ["earnings beat"]}
     out = strategy.apply_event_score(quant, event)
 
     assert out["signal"] == "buy"   # 1 + 2 = 3 >= threshold of 3
     assert out["regime"] == "range"
+
+
+def test_apply_event_score_honors_timeframe_threshold(monkeypatch):
+    monkeypatch.setattr(config, "SIGNAL_THRESHOLD", 4)
+    quant = {
+        "signal": "hold",
+        "score": 2,
+        "reason": "base",
+        "regime": "range",
+        "regime_confidence": 0.5,
+        "event_score": 0,
+        "event_reasons": [],
+        "timeframe": "5Min",
+        "market_trend": 0,
+        "earnings_soon": False,
+    }
+    event = {"event_score": 2, "event_reasons": ["earnings beat"]}
+
+    out = strategy.apply_event_score(quant, event)
+
+    assert out["signal"] == "hold"
+
+
+def test_apply_event_score_preserves_buy_suppressions(monkeypatch):
+    monkeypatch.setattr(config, "SIGNAL_THRESHOLD", 3)
+    quant = {
+        "signal": "hold",
+        "score": 3,
+        "reason": "base; [buy suppressed: earnings period]",
+        "regime": "range",
+        "regime_confidence": 0.5,
+        "event_score": 0,
+        "event_reasons": [],
+        "timeframe": "1Day",
+        "market_trend": 0,
+        "earnings_soon": True,
+    }
+    event = {"event_score": 2, "event_reasons": ["earnings beat"]}
+
+    out = strategy.apply_event_score(quant, event)
+
+    assert out["signal"] == "hold"
 
 
 def test_compute_signals_honors_threshold_override(monkeypatch):

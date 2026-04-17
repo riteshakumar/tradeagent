@@ -645,14 +645,16 @@ def _maybe_run_events(symbol: str, sig: dict) -> dict:
         return sig
     try:
         news = events.fetch_news(symbols=[symbol], keywords="earnings EPS guidance", limit=3)
-        has_earnings = any(
-            any(kw in n["headline"].lower() for kw in ("earnings", "eps", "guidance", "beat", "miss"))
-            for n in news
-            if n.get("headline")
-        )
+        has_earnings = events.has_earnings_news(news)
         if has_earnings:
             log.info("%s: earnings news detected - running event analysis", symbol)
-            event_result = events.get_event_score(symbol, run_earnings=True, run_geo=False, run_macro=False)
+            event_result = events.get_event_score(
+                symbol,
+                run_earnings=True,
+                run_geo=False,
+                run_macro=False,
+                news=news,
+            )
             sig = strategy.apply_event_score(sig, event_result)
             log.info("%s: post-event score=%s signal=%s", symbol, sig["score"], sig["signal"])
     except Exception as exc:
