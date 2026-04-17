@@ -44,7 +44,8 @@ def test_detects_high_volatility_regime(monkeypatch):
     assert sig["regime"] == "high_volatility"
 
 
-def test_apply_event_score_preserves_regime_keys():
+def test_apply_event_score_preserves_regime_keys(monkeypatch):
+    monkeypatch.setattr(config, "SIGNAL_THRESHOLD", 3)
     quant = {
         "signal": "hold",
         "score": 1,
@@ -57,5 +58,5 @@ def test_apply_event_score_preserves_regime_keys():
     event = {"event_score": 2, "event_reasons": ["earnings beat"]}
     out = strategy.apply_event_score(quant, event)
 
-    assert out["signal"] == "buy"
+    assert out["signal"] == "buy"   # 1 + 2 = 3 >= threshold of 3
     assert out["regime"] == "range"
