@@ -4,3 +4,14 @@ testpaths = ["tests"]
 markers = [
     "e2e: end-to-end pipeline tests (full _process_symbol flow, all IO mocked)",
 ]
+
+[tool.coverage.run]
+omit = [
+    "venv/*",
+    "tests/*",
+    "dashboard.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

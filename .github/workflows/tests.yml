@@ -47,7 +47,6 @@ jobs:
             --cov=. \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
-            --cov-omit="venv/*,tests/*,dashboard.py" \
             -v
 
       - name: Upload coverage report
