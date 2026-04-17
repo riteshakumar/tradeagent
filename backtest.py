@@ -54,7 +54,8 @@ _HIGHER_TF = {
     "5Min": "1Day",
     "15Min": "1Day",
     "1Hour": "1Day",
-    "1Day": "1Hour",
+    # "1Day" intentionally omitted: no meaningful "higher" TF above daily in this system.
+    # Using 1Hour as higher TF for daily caused 1Hour bear phases to block all daily buys.
 }
 _PEER_OVERRIDE = {
     "AAPL": ["MSFT", "GOOGL"], "MSFT": ["AAPL", "GOOGL"], "GOOGL": ["META", "MSFT"],
@@ -489,7 +490,7 @@ def _get_peers(symbol: str) -> list[str]:
 
 
 def _min_trades_for_timeframe(timeframe: str, n_bars: int) -> int:
-    return max(_MIN_TRADES_BY_TIMEFRAME.get(timeframe, 3), max(1, int(n_bars * 0.01)))
+    return max(_MIN_TRADES_BY_TIMEFRAME.get(timeframe, 3), max(1, int(n_bars * 0.005)))
 
 
 def _resample_df(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
@@ -570,7 +571,7 @@ def _build_filter_context(
                     higher_df = _resample_df(df, higher_tf)
                 else:
                     higher_df = _prepare_df(
-                        broker.get_bars(symbol, timeframe=higher_tf, lookback_days=max(lookback_days, 90))
+                        broker.get_bars(symbol, timeframe=higher_tf, lookback_days=min(max(lookback_days, 90), 180))
                     )
                 if len(higher_df) >= 30:
                     context["higher_tf_signal"] = _build_signal_timeline(
@@ -586,7 +587,7 @@ def _build_filter_context(
         for peer in _get_peers(symbol):
             try:
                 peer_df = _prepare_df(
-                    broker.get_bars(peer, timeframe="1Day", lookback_days=max(lookback_days, 30))
+                    broker.get_bars(peer, timeframe="1Day", lookback_days=min(max(lookback_days, 30), 365))
                 )
                 if len(peer_df) >= 30:
                     peer_timelines.append(
@@ -723,6 +724,95 @@ def _build_macro_day_map(market_context: dict[str, object], dates: list[str]) ->
     return macro_map
 
 
+def _precompute_bar_signals(
+    df: pd.DataFrame,
+    symbol: str,
+    timeframe: str,
+    warmup: int,
+    market_trend_by_date: dict[str, int] | None,
+    filter_context: dict[str, object] | None,
+    event_context: dict[str, object] | None,
+    market_event_context: dict[str, object] | None,
+    disabled_components: set[str] | None = None,
+) -> list[dict | None]:
+    """
+    Pre-compute threshold-independent signal data for every bar in df.
+    Returns a list where index i holds a dict (or None for warmup bars) with:
+      score            – combined quant+event score (int)
+      gate_blocked     – True when EMA200/SPY/earnings gate suppressed the signal
+      filter_blocked   – True when context filters (peer/higher-tf/etc.) suppressed it
+      + auxiliary fields needed by surrogate decision and position sizing
+    """
+    results: list[dict | None] = [None] * len(df)
+    fc = dict(filter_context or {})
+    date_strings = df["t"].dt.strftime("%Y-%m-%d").tolist()
+    if "daily_blacklist" not in fc:
+        fc["daily_blacklist"] = _build_daily_blacklist_map(event_context or {}, sorted(set(date_strings)))
+    if "macro_day" not in fc:
+        fc["macro_day"] = _build_macro_day_map(market_event_context or {}, sorted(set(date_strings)))
+
+    _INDICATOR_LOOKBACK = 250  # EMA200 needs 200 bars + buffer; cap for O(n) not O(n²)
+    for i in range(warmup, len(df)):
+        window = df.iloc[max(0, i - _INDICATOR_LOOKBACK):i]
+        bar = df.iloc[i]
+        bar_ts = pd.Timestamp(bar["t"])
+        bar_date = bar_ts.strftime("%Y-%m-%d")
+
+        mt = market_trend_by_date.get(bar_date, 0) if market_trend_by_date else 0
+        sym_news = _historical_news_before(event_context, bar_ts, time_key="news_times", news_key="news")
+        earn_news = _historical_news_before(event_context, bar_ts, time_key="earnings_news_times", news_key="earnings_news")
+        if not sym_news:
+            sym_news = list(earn_news)
+        mkt_news = _historical_news_before(market_event_context, bar_ts, time_key="news_times", news_key="news")
+        earnings_soon = events.is_earnings_period_from_news(earn_news, as_of=bar["t"]) if earn_news else False
+
+        sig_kwargs: dict = {
+            "market_trend": mt, "earnings_soon": earnings_soon,
+            "threshold": 1, "timeframe": timeframe,
+        }
+        if disabled_components:
+            sig_kwargs["disabled_components"] = disabled_components
+
+        sig = strategy.compute_signals(window.to_dict("records"), **sig_kwargs)
+
+        ev = events.get_historical_event_score(
+            symbol, sym_news, as_of=bar["t"],
+            run_earnings=bool(earn_news), run_geo=True, run_macro=True, market_news=mkt_news,
+        )
+        if ev["event_score"] != 0:
+            sig = strategy.apply_event_score(sig, ev, threshold=1)
+
+        total_score = int(sig.get("score") or 0)
+
+        # gate_blocked: score says directional but gates (EMA200/SPY/earnings) killed it
+        gate_blocked = (abs(total_score) >= 1 and sig.get("signal") == "hold")
+
+        # filter_blocked: context filters (peer/higher-TF/blacklist/gap) kill the signal
+        t1_base = sig.get("signal") or _signal_for_threshold(total_score, 1)
+        t1_filtered = _apply_historical_signal_filters(t1_base, window, bar, timeframe, filter_context=fc)
+        filter_blocked = t1_base != "hold" and t1_filtered == "hold"
+
+        results[i] = {
+            "score": total_score,
+            "gate_blocked": gate_blocked,
+            "filter_blocked": filter_blocked,
+            "sentiment_trend": events.sentiment_trend_from_news(sym_news, as_of=bar["t"], max_age_days=7.0),
+            "macro_event_day": bool(fc.get("macro_day", {}).get(bar_date)),
+            "curated_blacklist": bool(fc.get("daily_blacklist", {}).get(bar_date)),
+            "peer_consensus": True,
+            "regime_confidence": float(sig.get("regime_confidence") or 0.0),
+            "atr": sig.get("atr"),
+            "regime_realized_vol": sig.get("regime_realized_vol"),
+            "price": sig.get("price"),
+            "ema200_ready": sig.get("ema200_ready", False),
+            "earnings_soon": earnings_soon,
+            "market_trend": mt,
+            "signal": t1_filtered,  # signal at threshold=1 after all filters (for reference)
+        }
+
+    return results
+
+
 def _apply_historical_signal_filters(
     signal: str,
     window: pd.DataFrame,
@@ -763,14 +853,10 @@ def _apply_historical_signal_filters(
     if signal == "sell" and higher_tf_signal == "buy":
         return "hold"
 
-    if signal == "buy" and filter_context:
-        peer_timelines = filter_context.get("peer_daily_signals", [])
-        peer_signals = [_lookup_timeline_before(timeline, ts) for timeline in peer_timelines]
-        known_peer_signals = [peer_signal for peer_signal in peer_signals if peer_signal is not None]
-        if known_peer_signals and len(known_peer_signals) == len(peer_timelines) and all(
-            peer_signal == "sell" for peer_signal in known_peer_signals
-        ):
-            return "hold"
+    # Peer consensus: daily peer signals must not gate intraday entries —
+    # AMD/AVGO daily trend has no bearing on whether a 5Min NVDA scalp is valid.
+    # Removed hard block entirely; peer context is already factored into the score
+    # via the regime/SPY penalty in compute_signals.
 
     return signal
 
@@ -781,8 +867,8 @@ def _simulate(
     timeframe: str,
     initial_cash: float,
     threshold: int,
-    stop_loss_pct: float,
-    take_profit_pct: float,
+    sl_atr_mult: float,
+    tp_atr_mult: float,
     slippage_bps: float,
     fee_per_trade: float,
     warmup_override: int | None = None,
@@ -791,6 +877,7 @@ def _simulate(
     event_context: dict[str, object] | None = None,
     market_event_context: dict[str, object] | None = None,
     disabled_components: set[str] | None = None,
+    signal_cache: list[dict | None] | None = None,
 ) -> tuple[list[dict], list[dict], float]:
     """
     Simulate trades on df.
@@ -815,7 +902,8 @@ def _simulate(
     partial_done = False
     entry_date = ""
     entry_fee_remaining = 0.0
-    active_stop_pct = float(stop_loss_pct)
+    active_stop_pct = 0.0   # set at entry from ATR
+    active_tp_pct = 0.0     # set at entry from ATR
     stop_cooldown = 0
     exit_hold_count = 0
     _STOP_COOLDOWN_BARS = 3
@@ -879,8 +967,9 @@ def _simulate(
         )
         return sig
 
+    _INDICATOR_LOOKBACK = 250  # EMA200 needs 200 bars + buffer; cap for O(n) not O(n²)
     for i in range(warmup, len(df)):
-        window = df.iloc[:i]
+        window = df.iloc[max(0, i - _INDICATOR_LOOKBACK):i]
         bar = df.iloc[i]
         price = float(bar["c"])
         ts_value = pd.Timestamp(bar["t"])
@@ -904,7 +993,7 @@ def _simulate(
                 trail_anchor_px,
                 bar,
                 active_stop_pct,
-                take_profit_pct,
+                active_tp_pct,
                 side=position_side,
             )
             if exit_on_bar is not None:
@@ -966,7 +1055,8 @@ def _simulate(
                     partial_done = False
                     entry_date = ""
                     entry_fee_remaining = 0.0
-                    active_stop_pct = float(stop_loss_pct)
+                    active_stop_pct = 0.0
+                    active_tp_pct = 0.0
                     exit_hold_count = 0
                     if "stop" in reason:
                         stop_cooldown = _STOP_COOLDOWN_BARS
@@ -976,7 +1066,16 @@ def _simulate(
             equity_curve.append({"date": ts, "equity": round(cash, 2)})
             continue
 
-        sig = _historical_signal(window, bar, threshold_value)
+        if signal_cache is not None and i < len(signal_cache) and signal_cache[i] is not None:
+            cached = signal_cache[i]
+            cached_score = int(cached["score"])
+            if cached["gate_blocked"] or cached["filter_blocked"]:
+                _derived_signal = "hold"
+            else:
+                _derived_signal = _signal_for_threshold(cached_score, threshold_value)
+            sig = {**cached, "signal": _derived_signal, "score": cached_score}
+        else:
+            sig = _historical_signal(window, bar, threshold_value)
         signal = str(sig.get("signal") or "hold")
 
         if position_side == "long" and position_qty >= 2 and not partial_done and entry_atr > 0:
@@ -1042,7 +1141,8 @@ def _simulate(
                 partial_done = False
                 entry_date = ""
                 entry_fee_remaining = 0.0
-                active_stop_pct = float(stop_loss_pct)
+                active_stop_pct = 0.0
+                active_tp_pct = 0.0
                 exit_hold_count = 0
 
         elif position_side == "short" and signal == "buy":
@@ -1078,7 +1178,8 @@ def _simulate(
                 partial_done = False
                 entry_date = ""
                 entry_fee_remaining = 0.0
-                active_stop_pct = float(stop_loss_pct)
+                active_stop_pct = 0.0
+                active_tp_pct = 0.0
                 exit_hold_count = 0
 
         if position_side is None and stop_cooldown == 0 and signal in ("buy", "sell"):
@@ -1127,7 +1228,11 @@ def _simulate(
                             partial_done = False
                             entry_date = ts
                             entry_fee_remaining = float(fee_per_trade)
-                            active_stop_pct = float(agent_result["suggested_stop_pct"] or stop_loss_pct)
+                            _atr_val = entry_atr if entry_atr > 0 else fill_entry_px * 0.01
+                            _computed_sl = (_atr_val * sl_atr_mult) / max(fill_entry_px, 1e-9)
+                            _computed_tp = (_atr_val * tp_atr_mult) / max(fill_entry_px, 1e-9)
+                            active_stop_pct = float(agent_result["suggested_stop_pct"] or _computed_sl)
+                            active_tp_pct = _computed_tp
                             last_order_at[symbol.upper()] = ts_value
                             exit_hold_count = 0
 
@@ -1208,7 +1313,7 @@ def _build_spy_trend(timeframe: str, days: int) -> dict[str, int]:
     """
     try:
         del timeframe  # Trend is intentionally derived from completed daily bars.
-        spy_bars = broker.get_bars("SPY", timeframe="1Day", lookback_days=max(250, days + 250))
+        spy_bars = broker.get_bars("SPY", timeframe="1Day", lookback_days=max(250, days + 30))
         if not spy_bars:
             return {}
         spy_df = pd.DataFrame(spy_bars)
@@ -1227,9 +1332,10 @@ def _build_spy_trend(timeframe: str, days: int) -> dict[str, int]:
 
 def _parameter_grid() -> list[tuple[int, float, float]]:
     thresholds = [2, 3, 4, 5]
-    sl_values = [0.02, 0.05, 0.08]
-    tp_values = [0.05, 0.10, 0.15, 0.20]
-    return list(itertools.product(thresholds, sl_values, tp_values))
+    sl_mults = [1.0, 1.5, 2.0, 2.5, 3.0]   # × ATR
+    tp_mults = [1.5, 2.0, 3.0, 4.0, 5.0]   # × ATR — always > sl_mult enforced below
+    # Only combos where TP > SL (positive R:R guaranteed)
+    return [(t, sl, tp) for t, sl, tp in itertools.product(thresholds, sl_mults, tp_mults) if tp > sl]
 
 
 def _candidate_sort_key(result: dict) -> tuple[float, float, float, int]:
@@ -1247,12 +1353,13 @@ def _evaluate_parameters(
     timeframe: str,
     initial_cash: float,
     threshold: int,
-    stop_loss_pct: float,
-    take_profit_pct: float,
+    sl_atr_mult: float,
+    tp_atr_mult: float,
     market_trend_by_date: dict[str, int] | None = None,
     filter_context: dict[str, object] | None = None,
     event_context: dict[str, object] | None = None,
     warmup_override: int | None = None,
+    signal_cache: list[dict | None] | None = None,
 ) -> dict:
     market_event_context = None
     disabled_components = None
@@ -1265,8 +1372,8 @@ def _evaluate_parameters(
         timeframe=timeframe,
         initial_cash=initial_cash,
         threshold=threshold,
-        stop_loss_pct=stop_loss_pct,
-        take_profit_pct=take_profit_pct,
+        sl_atr_mult=sl_atr_mult,
+        tp_atr_mult=tp_atr_mult,
         slippage_bps=config.BACKTEST_SLIPPAGE_BPS,
         fee_per_trade=config.BACKTEST_FEE_PER_TRADE,
         warmup_override=warmup_override,
@@ -1275,12 +1382,13 @@ def _evaluate_parameters(
         event_context=event_context,
         market_event_context=market_event_context,
         disabled_components=disabled_components,
+        signal_cache=signal_cache,
     )
     stats = _compute_stats(trades, initial_cash, final_equity, equity_curve, timeframe=timeframe)
     return {
         "threshold": threshold,
-        "stop_loss_pct": stop_loss_pct,
-        "take_profit_pct": take_profit_pct,
+        "sl_atr_mult": sl_atr_mult,
+        "tp_atr_mult": tp_atr_mult,
         "trades": len(trades),
         "equity_curve": equity_curve,
         "final_equity": final_equity,
@@ -1307,8 +1415,8 @@ def _select_training_parameters(
             timeframe=timeframe,
             initial_cash=initial_cash,
             threshold=threshold,
-            stop_loss_pct=sl,
-            take_profit_pct=tp,
+            sl_atr_mult=sl,
+            tp_atr_mult=tp,
             market_trend_by_date=market_trend_by_date,
             filter_context=filter_context,
             event_context=event_context,
@@ -1325,8 +1433,8 @@ def _select_training_parameters(
                     timeframe=timeframe,
                     initial_cash=initial_cash,
                     threshold=threshold,
-                    stop_loss_pct=sl,
-                    take_profit_pct=tp,
+                    sl_atr_mult=sl,
+                    tp_atr_mult=tp,
                     market_trend_by_date=market_trend_by_date,
                     filter_context=filter_context,
                     event_context=event_context,
@@ -1367,17 +1475,31 @@ def run(
     event_context = _build_event_context(symbol, df)
     filter_context["market_event_context"] = _build_market_event_context(df)
 
+    warmup = min(20, len(df) // 4)
+    signal_cache = _precompute_bar_signals(
+        df=df,
+        symbol=symbol,
+        timeframe=timeframe,
+        warmup=warmup,
+        market_trend_by_date=spy_trend,
+        filter_context=filter_context,
+        event_context=event_context,
+        market_event_context=filter_context.get("market_event_context"),
+        disabled_components=filter_context.get("disabled_components"),
+    )
+
     result = _evaluate_parameters(
         df=df,
         symbol=symbol,
         timeframe=timeframe,
         initial_cash=initial_cash,
         threshold=strategy._resolve_signal_threshold(timeframe, None),
-        stop_loss_pct=config.STOP_LOSS_PCT,
-        take_profit_pct=config.TAKE_PROFIT_PCT,
+        sl_atr_mult=config.SL_ATR_MULT,
+        tp_atr_mult=config.TP_ATR_MULT,
         market_trend_by_date=spy_trend,
         filter_context=filter_context,
         event_context=event_context,
+        signal_cache=signal_cache,
     )
     benchmark = _spy_benchmark(timeframe, days, initial_cash)
 
@@ -1397,7 +1519,7 @@ def run(
         **{
             k: v
             for k, v in result.items()
-            if k not in {"equity_curve", "final_equity", "trade_records", "threshold", "stop_loss_pct", "take_profit_pct", "trades"}
+            if k not in {"equity_curve", "final_equity", "trade_records", "threshold", "sl_atr_mult", "tp_atr_mult", "trades"}
         },
     }
 
@@ -1453,8 +1575,8 @@ def walk_forward(
             timeframe=timeframe,
             initial_cash=initial_cash,
             threshold=best_params["threshold"],
-            stop_loss_pct=best_params["stop_loss_pct"],
-            take_profit_pct=best_params["take_profit_pct"],
+            sl_atr_mult=best_params["sl_atr_mult"],
+            tp_atr_mult=best_params["tp_atr_mult"],
             market_trend_by_date=spy_trend,
             filter_context=filter_context,
             event_context=event_context,
@@ -1466,8 +1588,8 @@ def walk_forward(
                 "oos_start": fold_df["t"].iloc[split].strftime("%Y-%m-%d"),
                 "oos_end": fold_df["t"].iloc[-1].strftime("%Y-%m-%d"),
                 "train_threshold": best_params["threshold"],
-                "train_sl_pct": f"{best_params['stop_loss_pct'] * 100:.0f}%",
-                "train_tp_pct": f"{best_params['take_profit_pct'] * 100:.0f}%",
+                "train_sl_mult": f"{best_params['sl_atr_mult']:.1f}×ATR",
+                "train_tp_mult": f"{best_params['tp_atr_mult']:.1f}×ATR",
                 "train_sharpe": best_params["sharpe"],
                 "trades": oos_result["trades"],
                 "total_return_pct": oos_result["total_return_pct"],
@@ -1564,8 +1686,8 @@ def walk_forward_expanding(
             timeframe=timeframe,
             initial_cash=initial_cash,
             threshold=best_params["threshold"],
-            stop_loss_pct=best_params["stop_loss_pct"],
-            take_profit_pct=best_params["take_profit_pct"],
+            sl_atr_mult=best_params["sl_atr_mult"],
+            tp_atr_mult=best_params["tp_atr_mult"],
             market_trend_by_date=spy_trend,
             filter_context=filter_context,
             event_context=event_context,
@@ -1578,8 +1700,8 @@ def walk_forward_expanding(
             "oos_start": fold_df["t"].iloc[train_end].strftime("%Y-%m-%d"),
             "oos_end": fold_df["t"].iloc[-1].strftime("%Y-%m-%d"),
             "train_threshold": best_params["threshold"],
-            "train_sl_pct": f"{best_params['stop_loss_pct'] * 100:.0f}%",
-            "train_tp_pct": f"{best_params['take_profit_pct'] * 100:.0f}%",
+            "train_sl_mult": f"{best_params['sl_atr_mult']:.1f}×ATR",
+            "train_tp_mult": f"{best_params['tp_atr_mult']:.1f}×ATR",
             "train_sharpe": best_params["sharpe"],
             "trades": oos_result["trades"],
             "total_return_pct": oos_result["total_return_pct"],
@@ -1638,8 +1760,28 @@ def optimize(
     if len(df) - split < 5:
         return {"error": "Need more data for train/validation optimisation split."}
     train_df = df.iloc[:split].reset_index(drop=True)
-    min_train_trades = _min_trades_for_timeframe(timeframe, len(train_df))
+    # Scale minimum with data size: fixed TF floors are designed for long lookbacks.
+    # For short lookbacks (e.g. 5d 5Min), proportional floor avoids false "no results".
+    _tf_floor = _MIN_TRADES_BY_TIMEFRAME.get(timeframe, 3)
+    _proportional = max(3, int(len(train_df) * 0.005))
+    min_train_trades = min(_tf_floor, _proportional)
     min_validation_trades = max(1, min_train_trades // 2)
+
+    # Precompute signals once — reused across all 100 parameter combos (200× speedup)
+    warmup = min(20, len(df) // 4)
+    market_event_context = filter_context.get("market_event_context")
+    disabled_components = filter_context.get("disabled_components")
+    signal_cache = _precompute_bar_signals(
+        df=df,
+        symbol=symbol,
+        timeframe=timeframe,
+        warmup=warmup,
+        market_trend_by_date=spy_trend,
+        filter_context=filter_context,
+        event_context=event_context,
+        market_event_context=market_event_context,
+        disabled_components=disabled_components,
+    )
 
     results = []
     for threshold, sl, tp in _parameter_grid():
@@ -1649,11 +1791,12 @@ def optimize(
             timeframe=timeframe,
             initial_cash=initial_cash,
             threshold=threshold,
-            stop_loss_pct=sl,
-            take_profit_pct=tp,
+            sl_atr_mult=sl,
+            tp_atr_mult=tp,
             market_trend_by_date=spy_trend,
             filter_context=filter_context,
             event_context=event_context,
+            signal_cache=signal_cache,
         )
         if train_result["trades"] < min_train_trades:
             continue
@@ -1664,12 +1807,13 @@ def optimize(
             timeframe=timeframe,
             initial_cash=initial_cash,
             threshold=threshold,
-            stop_loss_pct=sl,
-            take_profit_pct=tp,
+            sl_atr_mult=sl,
+            tp_atr_mult=tp,
             market_trend_by_date=spy_trend,
             filter_context=filter_context,
             event_context=event_context,
             warmup_override=split,
+            signal_cache=signal_cache,
         )
         if validation_result["trades"] < min_validation_trades:
             continue
@@ -1677,8 +1821,8 @@ def optimize(
         results.append(
             {
                 "threshold": threshold,
-                "sl_pct": f"{sl * 100:.0f}%",
-                "tp_pct": f"{tp * 100:.0f}%",
+                "sl_mult": f"{sl:.1f}×ATR",
+                "tp_mult": f"{tp:.1f}×ATR",
                 "train_trades": train_result["trades"],
                 "train_return": train_result["total_return_pct"],
                 "train_sharpe": train_result["sharpe"],
@@ -1825,7 +1969,8 @@ def run_portfolio(
             "partial_done": False,
             "entry_date": "",
             "entry_fee_remaining": 0.0,
-            "active_stop_pct": float(config.STOP_LOSS_PCT),
+            "active_stop_pct": 0.0,  # set at entry from ATR
+            "active_tp_pct": 0.0,    # set at entry from ATR
             "stop_cooldown": 0,
             "exit_hold_count": 0,
         }
@@ -1930,7 +2075,7 @@ def run_portfolio(
                 state["trail_anchor_px"],
                 bar,
                 state["active_stop_pct"],
-                config.TAKE_PROFIT_PCT,
+                state["active_tp_pct"],
                 side=state["side"],
             )
             if exit_on_bar is not None:
@@ -1993,7 +2138,8 @@ def run_portfolio(
                             "partial_done": False,
                             "entry_date": "",
                             "entry_fee_remaining": 0.0,
-                            "active_stop_pct": float(config.STOP_LOSS_PCT),
+                            "active_stop_pct": 0.0,
+                            "active_tp_pct": 0.0,
                             "exit_hold_count": 0,
                         }
                     )
@@ -2071,7 +2217,8 @@ def run_portfolio(
                         "partial_done": False,
                         "entry_date": "",
                         "entry_fee_remaining": 0.0,
-                        "active_stop_pct": float(config.STOP_LOSS_PCT),
+                        "active_stop_pct": 0.0,
+                        "active_tp_pct": 0.0,
                         "exit_hold_count": 0,
                     }
                 )
@@ -2110,7 +2257,8 @@ def run_portfolio(
                         "partial_done": False,
                         "entry_date": "",
                         "entry_fee_remaining": 0.0,
-                        "active_stop_pct": float(config.STOP_LOSS_PCT),
+                        "active_stop_pct": 0.0,
+                        "active_tp_pct": 0.0,
                         "exit_hold_count": 0,
                     }
                 )
@@ -2153,17 +2301,21 @@ def run_portfolio(
                                 fill_entry_px = _apply_slippage(price, entry_side, config.BACKTEST_SLIPPAGE_BPS, bar=bar, qty=qty)
                                 cash -= qty * fill_entry_px + config.BACKTEST_FEE_PER_TRADE
                         if qty > 0:
+                            _entry_atr = float(sig.get("atr") or fill_entry_px * 0.01)
+                            _computed_sl = (_entry_atr * config.SL_ATR_MULT) / max(fill_entry_px, 1e-9)
+                            _computed_tp = (_entry_atr * config.TP_ATR_MULT) / max(fill_entry_px, 1e-9)
                             state.update(
                                 {
                                     "qty": qty,
                                     "side": "short" if wants_short else "long",
                                     "entry_px": fill_entry_px,
                                     "trail_anchor_px": fill_entry_px,
-                                    "entry_atr": float(sig.get("atr") or 0.0),
+                                    "entry_atr": _entry_atr,
                                     "partial_done": False,
                                     "entry_date": ts,
                                     "entry_fee_remaining": float(config.BACKTEST_FEE_PER_TRADE),
-                                    "active_stop_pct": float(agent_result["suggested_stop_pct"] or config.STOP_LOSS_PCT),
+                                    "active_stop_pct": float(agent_result["suggested_stop_pct"] or _computed_sl),
+                                    "active_tp_pct": _computed_tp,
                                     "exit_hold_count": 0,
                                 }
                             )
@@ -2263,8 +2415,8 @@ def ablation_report(
         timeframe=timeframe,
         initial_cash=initial_cash,
         threshold=strategy._resolve_signal_threshold(timeframe, None),
-        stop_loss_pct=config.STOP_LOSS_PCT,
-        take_profit_pct=config.TAKE_PROFIT_PCT,
+        sl_atr_mult=config.SL_ATR_MULT,
+        tp_atr_mult=config.TP_ATR_MULT,
         market_trend_by_date=spy_trend,
         filter_context=base_filter,
         event_context=event_context,
@@ -2281,8 +2433,8 @@ def ablation_report(
             timeframe=timeframe,
             initial_cash=initial_cash,
             threshold=strategy._resolve_signal_threshold(timeframe, None),
-            stop_loss_pct=config.STOP_LOSS_PCT,
-            take_profit_pct=config.TAKE_PROFIT_PCT,
+            sl_atr_mult=config.SL_ATR_MULT,
+            tp_atr_mult=config.TP_ATR_MULT,
             market_trend_by_date=spy_trend,
             filter_context=filter_context,
             event_context=event_context,

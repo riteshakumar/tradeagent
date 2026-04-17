@@ -93,9 +93,14 @@ ALERT_SLACK_WEBHOOK = os.getenv("ALERT_SLACK_WEBHOOK", "").strip()
 ALERT_TELEGRAM_TOKEN = os.getenv("ALERT_TELEGRAM_TOKEN", "").strip()
 ALERT_TELEGRAM_CHAT_ID = os.getenv("ALERT_TELEGRAM_CHAT_ID", "").strip()
 
-# Stop loss / Take profit (0 = disabled)
+# Stop loss / Take profit (0 = disabled) — used for live trading fixed % stops
 STOP_LOSS_PCT = _env_float("STOP_LOSS_PCT", 0.05, minimum=0.0, maximum=0.99)
 TAKE_PROFIT_PCT = _env_float("TAKE_PROFIT_PCT", 0.10, minimum=0.0, maximum=10.0)
+
+# ATR-based dynamic SL/TP multipliers for backtesting (adapts to volatility per timeframe)
+# SL = sl_atr_mult × ATR / price,  TP = tp_atr_mult × ATR / price
+SL_ATR_MULT = _env_float("SL_ATR_MULT", 1.5, minimum=0.1, maximum=10.0)
+TP_ATR_MULT = _env_float("TP_ATR_MULT", 3.0, minimum=0.1, maximum=20.0)
 
 # Trading params
 WATCHLIST = _env_list("WATCHLIST", ["AAPL", "MSFT", "NVDA", "TSLA"])

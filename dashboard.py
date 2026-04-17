@@ -1283,7 +1283,11 @@ def render_backtest_panel():
         bt_tf = st.selectbox("Timeframe", ["1Min", "5Min", "15Min", "1Hour", "1Day"], index=4, key="bt_tf", label_visibility="collapsed")
     with bn:
         _bt_lookback_opts = {"5d": 5, "20d": 20, "60d": 60, "180d": 180, "1y": 365, "2y": 730}
-        bt_lookback_label = st.selectbox("Lookback", list(_bt_lookback_opts.keys()), index=5, key="bt_lookback", label_visibility="collapsed")
+        _bt_min_lookback = {"1Min": 20, "5Min": 20, "15Min": 60, "1Hour": 180, "1Day": 365}
+        _bt_lb_keys = list(_bt_lookback_opts.keys())
+        _bt_min_days = _bt_min_lookback.get(bt_tf, 20)
+        _bt_valid_keys = [k for k, v in _bt_lookback_opts.items() if v >= _bt_min_days]
+        bt_lookback_label = st.selectbox("Lookback", _bt_valid_keys, key="bt_lookback2", label_visibility="collapsed")
         bt_lookback_days = _bt_lookback_opts[bt_lookback_label]
     with br:
         run_bt = st.button("Run Backtest", type="primary", use_container_width=True)
@@ -1364,19 +1368,29 @@ def render_backtest_panel():
 
     with st.expander("Parameter Optimisation", expanded=False):
         st.caption("Searches threshold, stop loss, and take profit combinations ranked by Sharpe ratio.")
-        opt_c1, opt_c2 = st.columns([3, 1])
+        opt_c1, opt_c2, opt_c3, opt_c4 = st.columns([2, 1, 1, 1])
         with opt_c1:
             opt_sym = st.selectbox("Symbol", watchlist, key="opt_sym", label_visibility="collapsed")
         with opt_c2:
+            opt_tf = st.selectbox("Timeframe", ["1Min", "5Min", "15Min", "1Hour", "1Day"], index=4, key="opt_tf2", label_visibility="collapsed")
+        with opt_c3:
+            _opt_lb_opts = {"5d": 5, "20d": 20, "60d": 60, "180d": 180, "1y": 365, "2y": 730}
+            _opt_min_lookback = {"1Min": 20, "5Min": 20, "15Min": 60, "1Hour": 180, "1Day": 365}
+            _opt_min_days = _opt_min_lookback.get(opt_tf, 20)
+            _opt_valid_keys = [k for k, v in _opt_lb_opts.items() if v >= _opt_min_days]
+            opt_lb_label = st.selectbox("Lookback", _opt_valid_keys, key="opt_lb2", label_visibility="collapsed")
+            opt_lb_days = _opt_lb_opts[opt_lb_label]
+        with opt_c4:
             run_opt = st.button("Optimise", type="primary", use_container_width=True)
         if run_opt:
-            with st.spinner(f"Grid searching {opt_sym}..."):
-                opt = backtest.optimize(opt_sym)
+            with st.spinner(f"Grid searching {opt_sym} · {opt_tf} · {opt_lb_label}..."):
+                opt = backtest.optimize(opt_sym, timeframe=opt_tf, lookback_days=opt_lb_days)
             if "error" in opt:
                 alert("danger", opt["error"])
+                st.caption("Tip: Try a shorter lookback or lower timeframe — optimizer needs enough trades to evaluate.")
             else:
                 best = opt["best"]
-                alert("success", f"Best: threshold={best['threshold']} · SL={best['sl_pct']} · TP={best['tp_pct']} · Sharpe {best['sharpe']}")
+                alert("success", f"Best: threshold={best['threshold']} · SL={best['sl_mult']} · TP={best['tp_mult']} · Sharpe {best['sharpe']} · {best['trades']} trades")
                 html_table(opt["results"], max_height=320)
 
 

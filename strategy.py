@@ -35,7 +35,7 @@ _TIMEFRAME_SIGNAL_THRESHOLD_OFFSET = {
     "5Min": 1,
     "15Min": 0,
     "1Hour": 0,
-    "1Day": 0,
+    "1Day": -1,
 }
 
 # ADX thresholds for hard mode switching
@@ -661,29 +661,28 @@ def compute_signals(
         weighted_score += raw * weight
         reasons.append(f"{component_reasons[name]} [{name} x{weight:.2f}]")
 
+    # SPY bear-market penalty: raises effective threshold by 1 (soft, not hard block)
+    # Hard block was killing dip-buy opportunities; _ema_score already penalises downtrends.
+    if market_trend == -1:
+        weighted_score -= 1.0
+        reasons.append("[SPY bear penalty: -1]")
+
     score = int(round(weighted_score))
     t = _resolve_signal_threshold(resolved_timeframe, threshold)
     signal = "buy" if score >= t else ("sell" if score <= -t else "hold")
 
     # ------------------------------------------------------------------
-    # Gate 1: SPY bear-market suppression
-    # ------------------------------------------------------------------
-    if market_trend == -1 and signal == "buy":
-        signal = "hold"
-        reasons.append("[buy suppressed: SPY below EMA200]")
-
-    # ------------------------------------------------------------------
-    # Gate 2: Stock's own EMA200 — don't buy in individual downtrend
+    # Gate: Stock's own EMA200
+    # NOTE: _ema_score already returns -1/-2 for downtrends.
+    # Hard-blocking below EMA200 double-penalises oversold bounces where
+    # RSI/BB both signal buy. Store ema200 info for reference only.
     # ------------------------------------------------------------------
     ema200_val = float(_ema(close, 200).iloc[-1])
     stock_price = float(close.iloc[-1])
     ema200_ready = len(close) >= 200 and not np.isnan(ema200_val)
-    if signal == "buy" and ema200_ready and stock_price < ema200_val:
-        signal = "hold"
-        reasons.append(f"[buy suppressed: price {stock_price:.2f} below own EMA200 {ema200_val:.2f}]")
 
     # ------------------------------------------------------------------
-    # Gate 3: Earnings risk window
+    # Gate: Earnings risk window (keep as hard block — earnings gaps are real)
     # ------------------------------------------------------------------
     if signal == "buy" and earnings_soon:
         signal = "hold"
@@ -742,10 +741,6 @@ def apply_event_score(quant: dict, event: dict, threshold: int | None = None) ->
     else:
         signal = "hold"
 
-    if signal == "buy" and "[buy suppressed:" in str(quant.get("reason") or ""):
-        signal = "hold"
-    if quant.get("market_trend") == -1 and signal == "buy":
-        signal = "hold"
     if quant.get("earnings_soon") and signal == "buy":
         signal = "hold"
 

@@ -70,6 +70,7 @@ def get_positions() -> list[dict]:
 
 
 @retry(**_READ_RETRY)
+@retry(**_READ_RETRY)
 def get_bars(symbol: str, timeframe: str | None = None, lookback_days: int | None = None) -> list[dict]:
     tf_key = timeframe or config.BAR_TIMEFRAME
     tf, default_lookback = _TIMEFRAME_MAP.get(tf_key, _TIMEFRAME_MAP["5Min"])
