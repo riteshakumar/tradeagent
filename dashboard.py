@@ -554,7 +554,7 @@ def render_control_deck():
             _ws_saved = settings_store.get("watch_source", "my_list")
             _ws_default_idx = _ws_options.index(_ws_saved) if _ws_saved in _ws_options else 0
             watch_source = st.selectbox(
-                "",
+                "Watchlist source",
                 _ws_options,
                 index=_ws_default_idx,
                 format_func=lambda x: {
@@ -618,7 +618,7 @@ def render_control_deck():
             _tf_saved = settings_store.get("bar_timeframe", config.BAR_TIMEFRAME)
             _tf_saved = _tf_saved if _tf_saved in _tf_options else config.BAR_TIMEFRAME
             bar_timeframe = st.selectbox(
-                "",
+                "Chart timeframe",
                 _tf_options,
                 index=_tf_options.index(_tf_saved),
                 format_func=lambda x: {"1Min": "1 Min", "5Min": "5 Min", "15Min": "15 Min", "1Hour": "1 Hour", "1Day": "1 Day"}[x],
