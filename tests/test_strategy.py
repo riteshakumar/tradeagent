@@ -153,6 +153,47 @@ def test_compute_signals_uses_explicit_timeframe_for_intraday(monkeypatch):
     assert captured["is_intraday"] is True
 
 
+def test_compute_signals_exposes_component_scores(monkeypatch):
+    monkeypatch.setattr(config, "ENABLE_REGIME_SWITCHING", False)
+
+    def _stub_components(_close, _volume, _df, timeframe="1Day", is_intraday=False):
+        return (
+            {"ema": 2, "macd": -1, "momentum": 1},
+            {"ema": "ema", "macd": "macd", "momentum": "momentum"},
+            {"regime": "range", "confidence": 0.6, "trend_strength": 0.0, "realized_vol": 0.0},
+            30.0,
+        )
+
+    monkeypatch.setattr(strategy, "_score_components", _stub_components)
+
+    sig = strategy.compute_signals(_bars_from_prices([100.0] * 40))
+
+    assert sig["ema_score"] == 2
+    assert sig["macd_score"] == -1
+    assert sig["momentum_score"] == 1
+    assert sig["adx_score"] == 1
+
+
+def test_compute_signals_reports_ema200_readiness(monkeypatch):
+    monkeypatch.setattr(config, "ENABLE_REGIME_SWITCHING", False)
+
+    def _stub_components(_close, _volume, _df, timeframe="1Day", is_intraday=False):
+        return (
+            {"ema": 2},
+            {"ema": "ema"},
+            {"regime": "bull_trend", "confidence": 1.0, "trend_strength": 0.01, "realized_vol": 0.0},
+            30.0,
+        )
+
+    monkeypatch.setattr(strategy, "_score_components", _stub_components)
+
+    not_ready = strategy.compute_signals(_bars_from_prices([100.0] * 50), threshold=1)
+    ready = strategy.compute_signals(_bars_from_prices([100.0] * 220), threshold=1)
+
+    assert not_ready["ema200_ready"] is False
+    assert ready["ema200_ready"] is True
+
+
 def test_disable_regime_switching_disables_adx_mode_switch(monkeypatch):
     bars = _bars_from_prices([100.0] * 40)
     df = pd.DataFrame(bars)

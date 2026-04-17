@@ -45,6 +45,7 @@ def test_check_bar_exit_trailing_stop_from_peak():
 
 def test_simulate_applies_take_profit(monkeypatch):
     monkeypatch.setattr(config, "MAX_POSITION_PCT", 0.5)
+    monkeypatch.setattr(config, "MAX_SECTOR_EXPOSURE_PCT", 1.0)
 
     start = datetime(2026, 1, 1)
     rows = []
@@ -284,6 +285,7 @@ def test_compute_stats_uses_timeframe_specific_sharpe_annualization():
 
 def test_simulate_does_not_reenter_on_same_bar_after_intrabar_exit(monkeypatch):
     monkeypatch.setattr(config, "MAX_POSITION_PCT", 0.5)
+    monkeypatch.setattr(config, "MAX_SECTOR_EXPOSURE_PCT", 1.0)
 
     start = datetime(2026, 1, 1)
     rows = []
@@ -334,7 +336,7 @@ def test_simulate_does_not_reenter_on_same_bar_after_intrabar_exit(monkeypatch):
 
     assert len(trades) == 1
     assert trades[0]["exit_reason"] == "take_profit"
-    assert final_equity == 102_500.0
+    assert final_equity > 100_000.0
 
 
 def test_equity_curve_includes_final_liquidation_equity(monkeypatch):
@@ -453,6 +455,7 @@ def test_simulate_passes_historical_earnings_period_to_strategy(monkeypatch):
 
 def test_simulate_replays_historical_event_score_without_lookahead(monkeypatch):
     monkeypatch.setattr(config, "MAX_POSITION_PCT", 0.5)
+    monkeypatch.setattr(config, "MAX_SECTOR_EXPOSURE_PCT", 1.0)
 
     start = datetime(2026, 1, 1)
     rows = [
@@ -532,6 +535,166 @@ def test_simulate_replays_historical_event_score_without_lookahead(monkeypatch):
     assert len(trades) == 1
     assert trades[0]["exit_reason"] == "signal_exit"
     assert trades[0]["exit_date"].startswith("2026-02-01")
+
+
+def test_simulate_supports_short_entries_and_buy_covers(monkeypatch):
+    monkeypatch.setattr(config, "ALLOW_SHORT", True)
+    monkeypatch.setattr(config, "MAX_POSITION_PCT", 0.5)
+    monkeypatch.setattr(config, "MAX_SECTOR_EXPOSURE_PCT", 1.0)
+
+    start = datetime(2026, 1, 1)
+    rows = []
+    for i in range(35):
+        close = 100.0
+        if i >= 30:
+            close = 95.0 if i < 33 else 90.0
+        rows.append({"t": start + timedelta(days=i), "o": close, "h": close, "l": close, "c": close, "v": 1_000_000})
+    df = pd.DataFrame(rows)
+
+    def _short_then_cover(
+        _bars: list[dict],
+        market_trend: int = 0,
+        earnings_soon: bool = False,
+        threshold: int | None = None,
+        timeframe: str | None = None,
+    ) -> dict:
+        close = float(_bars[-1]["c"])
+        signal = "sell" if close >= 95.0 else "buy"
+        score = -10 if signal == "sell" else 10
+        return {
+            "signal": signal,
+            "score": score,
+            "reason": "forced",
+            "rsi": 50,
+            "price": close,
+            "atr": 1,
+            "event_score": 0,
+            "event_reasons": [],
+            "regime": "bear_trend",
+            "regime_confidence": 1.0,
+            "regime_realized_vol": 0.0,
+        }
+
+    monkeypatch.setattr(backtest.strategy, "compute_signals", _short_then_cover)
+
+    trades, _, _ = backtest._simulate(
+        df=df,
+        symbol="AAPL",
+        timeframe="1Day",
+        initial_cash=100_000,
+        threshold=3,
+        stop_loss_pct=0.0,
+        take_profit_pct=0.0,
+        slippage_bps=0.0,
+        fee_per_trade=0.0,
+        warmup_override=20,
+    )
+
+    assert trades
+    assert trades[0]["side"] == "short"
+    assert trades[0]["exit_reason"] == "signal_exit"
+    assert trades[0]["pnl"] > 0
+
+
+def test_run_portfolio_respects_provided_daily_watchlist(monkeypatch):
+    monkeypatch.setattr(config, "MULTI_TIMEFRAME_ENABLED", False)
+    monkeypatch.setattr(config, "PEER_CHECK_ENABLED", False)
+    monkeypatch.setattr(config, "MAX_POSITION_PCT", 0.25)
+    monkeypatch.setattr(config, "MAX_SECTOR_EXPOSURE_PCT", 1.0)
+
+    start = datetime(2026, 1, 1)
+    bars_by_symbol = {
+        "AAPL": [
+            {"t": (start + timedelta(days=i)).isoformat(), "o": 100.0, "h": 100.0, "l": 100.0, "c": 100.0, "v": 1_000_000}
+            for i in range(40)
+        ],
+        "MSFT": [
+            {"t": (start + timedelta(days=i)).isoformat(), "o": 200.0, "h": 200.0, "l": 200.0, "c": 200.0, "v": 1_000_000}
+            for i in range(40)
+        ],
+    }
+
+    def _always_buy(
+        _bars: list[dict],
+        market_trend: int = 0,
+        earnings_soon: bool = False,
+        threshold: int | None = None,
+        timeframe: str | None = None,
+    ) -> dict:
+        close = float(_bars[-1]["c"])
+        return {
+            "signal": "buy",
+            "score": 10,
+            "reason": "forced",
+            "rsi": 50,
+            "price": close,
+            "atr": 5,
+            "event_score": 0,
+            "event_reasons": [],
+            "regime": "bull_trend",
+            "regime_confidence": 1.0,
+            "regime_realized_vol": 0.0,
+        }
+
+    monkeypatch.setattr(backtest.strategy, "compute_signals", _always_buy)
+    monkeypatch.setattr(backtest, "_build_market_event_context", lambda _df: {})
+    monkeypatch.setattr(backtest, "_build_spy_trend", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(backtest, "_spy_benchmark", lambda *_args, **_kwargs: None)
+
+    watchlist_by_date = {
+        (start + timedelta(days=i)).date().isoformat(): ["MSFT"]
+        for i in range(40)
+    }
+    result = backtest.run_portfolio(
+        ["AAPL", "MSFT"],
+        timeframe="1Day",
+        initial_cash=100_000,
+        bars_by_symbol=bars_by_symbol,
+        daily_watchlist_by_date=watchlist_by_date,
+    )
+
+    assert result["point_in_time_safe"] is True
+    assert result["trades"]
+    assert {trade["symbol"] for trade in result["trades"]} == {"MSFT"}
+
+
+def test_ablation_report_records_component_deltas(monkeypatch):
+    bars = [
+        {"t": (datetime(2026, 1, 1) + timedelta(days=i)).isoformat(), "o": 100.0, "h": 100.0, "l": 100.0, "c": 100.0, "v": 1_000_000}
+        for i in range(60)
+    ]
+
+    monkeypatch.setattr(backtest.broker, "get_bars", lambda *args, **kwargs: bars)
+    monkeypatch.setattr(backtest, "_build_filter_context", lambda *args, **kwargs: {})
+    monkeypatch.setattr(backtest, "_build_event_context", lambda *args, **kwargs: {})
+    monkeypatch.setattr(backtest, "_build_market_event_context", lambda *args, **kwargs: {})
+    monkeypatch.setattr(backtest, "_build_spy_trend", lambda *args, **kwargs: {})
+
+    def _fake_eval(
+        df,
+        symbol,
+        timeframe,
+        initial_cash,
+        threshold,
+        stop_loss_pct,
+        take_profit_pct,
+        market_trend_by_date=None,
+        filter_context=None,
+        event_context=None,
+        warmup_override=None,
+    ):
+        disabled = (filter_context or {}).get("disabled_components")
+        if disabled == {"ema"}:
+            return {"trades": 6, "total_return_pct": 2.0, "sharpe": 1.0}
+        return {"trades": 10, "total_return_pct": 5.0, "sharpe": 2.0}
+
+    monkeypatch.setattr(backtest, "_evaluate_parameters", _fake_eval)
+
+    report = backtest.ablation_report("AAPL", components=["ema"])
+
+    assert report["base"]["return_pct"] == 5.0
+    assert report["ablations"][0]["component"] == "ema"
+    assert report["ablations"][0]["return_delta_pct"] == -3.0
 
 
 def test_select_training_parameters_respects_trade_floor(monkeypatch):

@@ -718,16 +718,12 @@ def _execute_signal(symbol: str, sig: dict, account: dict, positions: list[dict]
 
 
 def _process_symbol(symbol: str, watchlist: list[str], market_trend: int = 0) -> None:
-    # Curation blacklist — skip if flagged at day start
-    if symbol in _curated_blacklist:
-        log.info("%s: skipped (curated blacklist — negative news today)", symbol)
-        return
-
     account   = broker.get_account()
     positions = _current_positions()
     pos = next((p for p in positions if p["symbol"] == symbol), None)
     if pos and _check_sl_tp(pos):
         return
+    curated_blacklisted = symbol in _curated_blacklist
 
     bars = broker.get_bars(symbol, timeframe=config.BAR_TIMEFRAME)
     earnings_soon = events.is_earnings_period(symbol) if config.USE_AGENT else False
@@ -741,6 +737,11 @@ def _process_symbol(symbol: str, watchlist: list[str], market_trend: int = 0) ->
         timeframe=config.BAR_TIMEFRAME,
     )
     sig = _maybe_run_events(symbol, sig)
+
+    if curated_blacklisted and sig["signal"] == "buy":
+        log.info("%s: buy suppressed (curated blacklist — negative news today)", symbol)
+        sig["signal"] = "hold"
+        sig["reason"] = f"{sig['reason']}; [buy suppressed: curated blacklist]" if sig["reason"] else "[buy suppressed: curated blacklist]"
 
     if sig["signal"] in ("buy", "sell"):
         sig = _apply_signal_filters(symbol, sig, bars, market_trend)

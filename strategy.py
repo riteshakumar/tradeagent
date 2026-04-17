@@ -599,6 +599,7 @@ def compute_signals(
     earnings_soon: bool = False,
     threshold: int | None = None,
     timeframe: str | None = None,
+    disabled_components: set[str] | None = None,
 ) -> dict:
     """
     Compute trading signals from OHLCV bars.
@@ -620,6 +621,7 @@ def compute_signals(
         "regime": "range", "regime_confidence": 0.0,
         "market_trend": market_trend,
         "timeframe": timeframe or "1Day",
+        "ema200_ready": False,
     }
     if len(bars) < 30:
         return empty
@@ -640,6 +642,14 @@ def compute_signals(
         timeframe=resolved_timeframe,
         is_intraday=is_intraday,
     )
+    disabled = {str(name).strip().lower() for name in (disabled_components or set()) if str(name).strip()}
+    if disabled:
+        component_scores = {name: score for name, score in component_scores.items() if name not in disabled}
+        component_reasons = {name: reason for name, reason in component_reasons.items() if name not in disabled}
+        if not _check_indicator_agreement(component_scores):
+            component_scores = {}
+            component_reasons = {}
+
     weights = _BASE_WEIGHTS
     if config.ENABLE_REGIME_SWITCHING:
         weights = _REGIME_WEIGHTS.get(regime["regime"], _BASE_WEIGHTS)
@@ -667,7 +677,8 @@ def compute_signals(
     # ------------------------------------------------------------------
     ema200_val = float(_ema(close, 200).iloc[-1])
     stock_price = float(close.iloc[-1])
-    if signal == "buy" and stock_price < ema200_val and not np.isnan(ema200_val):
+    ema200_ready = len(close) >= 200 and not np.isnan(ema200_val)
+    if signal == "buy" and ema200_ready and stock_price < ema200_val:
         signal = "hold"
         reasons.append(f"[buy suppressed: price {stock_price:.2f} below own EMA200 {ema200_val:.2f}]")
 
@@ -681,6 +692,16 @@ def compute_signals(
     atr_series = _atr(df)
     last_atr   = float(atr_series.iloc[-1]) if not np.isnan(atr_series.iloc[-1]) else None
     last_rsi   = float(_rsi(close).iloc[-1])
+    component_field_map = {
+        "ema_score": "ema",
+        "macd_score": "macd",
+        "rsi_score": "rsi",
+        "bb_score": "bb",
+        "supertrend_score": "supertrend",
+        "vwap_score": "vwap",
+        "breakout_score": "breakout",
+        "momentum_score": "momentum",
+    }
 
     return {
         "signal":  signal,
@@ -699,12 +720,10 @@ def compute_signals(
         "timeframe":             resolved_timeframe,
         "market_trend":          market_trend,
         "earnings_soon":         earnings_soon,
+        "ema200_ready":          ema200_ready,
         # Individual component scores — exposed for agent context
-        **{k: component_scores.get(k, 0) for k in (
-            "ema_score", "macd_score", "rsi_score", "bb_score",
-            "supertrend_score", "vwap_score", "breakout_score",
-            "momentum_score", "adx_score",
-        )},
+        **{field: component_scores.get(component, 0) for field, component in component_field_map.items()},
+        "adx_score": 1 if adx_value >= _ADX_TREND_MIN else (-1 if 0 < adx_value < _ADX_RANGE_MAX else 0),
     }
 
 

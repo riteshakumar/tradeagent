@@ -71,8 +71,49 @@ _MIN_TRADES_BY_TIMEFRAME = {
 }
 
 
-def _apply_slippage(price: float, side: str, slippage_bps: float) -> float:
-    slip = slippage_bps / 10_000.0
+def _execution_slippage_bps(
+    price: float,
+    side: str,
+    slippage_bps: float,
+    bar: pd.Series | None = None,
+    qty: float = 0.0,
+) -> float:
+    del side  # Execution cost is direction-agnostic at the bps layer.
+    total_bps = float(slippage_bps)
+    if bar is None or price <= 0:
+        return total_bps
+
+    try:
+        high = float(bar.get("h", price))
+        low = float(bar.get("l", price))
+        volume = max(0.0, float(bar.get("v", 0.0)))
+    except Exception:
+        return total_bps
+
+    # Model a simple half-spread plus a volatility-dependent impact penalty.
+    total_bps += 1.0
+    range_bps = max(0.0, ((high - low) / price) * 10_000.0)
+    total_bps += min(25.0, range_bps * 0.05)
+
+    if qty > 0 and volume > 0:
+        tradable = max(1.0, volume * 0.02)
+        impact_ratio = min(1.0, float(qty) / tradable)
+        impact_bps = 30.0 * impact_ratio
+        if config.ENABLE_ORDER_SLICING and qty > config.ORDER_SLICE_MAX_QTY:
+            slices = max(1, int(np.ceil(float(qty) / float(config.ORDER_SLICE_MAX_QTY))))
+            impact_bps /= min(5, slices)
+        total_bps += impact_bps
+    return total_bps
+
+
+def _apply_slippage(
+    price: float,
+    side: str,
+    slippage_bps: float,
+    bar: pd.Series | None = None,
+    qty: float = 0.0,
+) -> float:
+    slip = _execution_slippage_bps(price, side, slippage_bps, bar=bar, qty=qty) / 10_000.0
     if side == "buy":
         return price * (1 + slip)
     return price * (1 - slip)
@@ -84,6 +125,7 @@ def _check_bar_exit(
     bar: pd.Series,
     stop_loss_pct: float,
     take_profit_pct: float,
+    side: str = "long",
 ) -> tuple[float, str] | None:
     """
     Returns (exit_price, reason) if stop/TP hit intrabar.
@@ -94,11 +136,17 @@ def _check_bar_exit(
     low = float(bar["l"])
     high = float(bar["h"])
     # Trailing stop: trail from highest point reached since entry
-    stop_px = peak_price * (1 - stop_loss_pct) if stop_loss_pct > 0 else None
-    take_px = entry_price * (1 + take_profit_pct) if take_profit_pct > 0 else None
+    if side == "short":
+        stop_px = peak_price * (1 + stop_loss_pct) if stop_loss_pct > 0 else None
+        take_px = entry_price * (1 - take_profit_pct) if take_profit_pct > 0 else None
+        stop_hit = stop_px is not None and high >= stop_px
+        take_hit = take_px is not None and low <= take_px
+    else:
+        stop_px = peak_price * (1 - stop_loss_pct) if stop_loss_pct > 0 else None
+        take_px = entry_price * (1 + take_profit_pct) if take_profit_pct > 0 else None
+        stop_hit = stop_px is not None and low <= stop_px
+        take_hit = take_px is not None and high >= take_px
 
-    stop_hit = stop_px is not None and low <= stop_px
-    take_hit = take_px is not None and high >= take_px
     if stop_hit and take_hit:
         return stop_px, "trailing_stop"
     if stop_hit:
@@ -117,11 +165,14 @@ def _make_trade(
     exit_date: str = "",
     exit_reason: str = "signal_exit",
     fees: float = 0.0,
+    side: str = "long",
 ) -> dict:
-    pnl = (exit_px - entry_px) * qty - fees
+    gross = (exit_px - entry_px) * qty if side == "long" else (entry_px - exit_px) * qty
+    pnl = gross - fees
     notional = qty * entry_px
     return {
         "symbol": symbol,
+        "side": side,
         "entry": round(entry_px, 2),
         "exit": round(exit_px, 2),
         "qty": qty,
@@ -130,6 +181,207 @@ def _make_trade(
         "entry_date": entry_date,
         "exit_date": exit_date,
         "exit_reason": exit_reason,
+    }
+
+
+def _mark_to_market_value(side: str, qty: float, price: float) -> float:
+    if qty <= 0:
+        return 0.0
+    return qty * price if side == "long" else -qty * price
+
+
+def _position_notional(qty: float, price: float) -> float:
+    return abs(float(qty) * float(price))
+
+
+def _equity_with_position(cash: float, side: str | None, qty: float, price: float) -> float:
+    if not side or qty <= 0:
+        return float(cash)
+    return float(cash) + _mark_to_market_value(side, qty, price)
+
+
+def _resolve_exit_fill(
+    raw_exit_px: float,
+    reason: str,
+    bar: pd.Series,
+    side: str,
+    slippage_bps: float,
+    qty: float,
+) -> float:
+    bar_open = float(bar.get("o", raw_exit_px))
+    fill_px = float(raw_exit_px)
+    if reason == "trailing_stop":
+        if side == "long" and bar_open < raw_exit_px:
+            fill_px = bar_open
+        if side == "short" and bar_open > raw_exit_px:
+            fill_px = bar_open
+    elif reason == "take_profit":
+        if side == "long" and bar_open > raw_exit_px:
+            fill_px = bar_open
+        if side == "short" and bar_open < raw_exit_px:
+            fill_px = bar_open
+    exit_side = "sell" if side == "long" else "buy"
+    return _apply_slippage(fill_px, exit_side, slippage_bps, bar=bar, qty=qty)
+
+
+def _account_snapshot(cash: float, equity: float) -> dict:
+    buying_power = max(float(cash), float(equity))
+    return {
+        "equity": float(equity),
+        "cash": float(cash),
+        "buying_power": buying_power,
+        "portfolio_value": float(equity),
+    }
+
+
+def _position_snapshot(symbol: str, side: str, qty: float, current_price: float, avg_entry: float) -> dict:
+    market_value = _position_notional(qty, current_price)
+    pnl = (current_price - avg_entry) * qty if side == "long" else (avg_entry - current_price) * qty
+    pnl_pct = (pnl / (avg_entry * qty)) if avg_entry > 0 and qty > 0 else 0.0
+    return {
+        "symbol": symbol,
+        "qty": float(qty),
+        "side": side,
+        "avg_entry": float(avg_entry),
+        "current_price": float(current_price),
+        "market_value": float(market_value),
+        "unrealized_pnl": float(pnl),
+        "unrealized_pnl_pct": float(pnl_pct),
+    }
+
+
+def _local_close_fetcher(close_history: dict[str, list[float]]):
+    def _fetch(symbol: str, lookback_days: int) -> list[float]:
+        closes = list(close_history.get(symbol.upper(), []))
+        if lookback_days <= 0:
+            return closes
+        return closes[-lookback_days:]
+
+    return _fetch
+
+
+def _backtest_pre_trade_checks(
+    symbol: str,
+    side: str,
+    price: float,
+    account: dict,
+    positions: list[dict],
+    now: pd.Timestamp,
+    last_order_at: dict[str, pd.Timestamp],
+    close_history: dict[str, list[float]],
+    atr: float | None = None,
+    realized_vol: float | None = None,
+    risk_manager: risk.RiskManager | None = None,
+) -> tuple[bool, str, float]:
+    if price <= 0:
+        return False, "invalid price", 0.0
+
+    last_ts = last_order_at.get(symbol.upper())
+    if last_ts is not None:
+        elapsed = (pd.Timestamp(now) - pd.Timestamp(last_ts)).total_seconds()
+        if elapsed < float(config.ORDER_COOLDOWN_SEC):
+            return False, "cooldown active", 0.0
+
+    if not risk.check_position_size(price, account):
+        return False, "share price exceeds max position size", 0.0
+    if not risk.check_cash_buffer(account):
+        return False, "cash below reserve buffer", 0.0
+    if risk_manager is not None:
+        drawdown_state = risk_manager.evaluate_drawdown(account)
+        if drawdown_state["halted"]:
+            return False, "drawdown halt active", 0.0
+        daily_state = risk_manager.update_daily_loss_guard(account, now=pd.Timestamp(now).to_pydatetime())
+        if daily_state["halted"]:
+            return False, "daily loss stop active", 0.0
+
+    qty = risk.compute_qty(price, account, atr=atr, realized_vol=realized_vol)
+    if qty <= 0:
+        return False, "qty resolved to zero", 0.0
+    if not risk.check_buying_power(price, qty, account):
+        return False, "insufficient buying power", 0.0
+
+    ok, reason = risk.check_sector_exposure(symbol, price, qty, positions, account)
+    if not ok:
+        return False, reason, 0.0
+
+    ok, reason = risk.check_correlation_cap(
+        symbol,
+        positions,
+        close_fetcher=_local_close_fetcher(close_history),
+    )
+    if not ok:
+        return False, reason, 0.0
+
+    del side
+    return True, "ok", float(qty)
+
+
+def _surrogate_agent_decision(
+    signal: dict,
+    threshold: int,
+    for_exit: bool = False,
+) -> dict:
+    raw_score = int(signal.get("score") or 0)
+    abs_score = abs(raw_score)
+    regime_conf = float(signal.get("regime_confidence") or 0.0)
+    sentiment = int(signal.get("sentiment_trend") or 0)
+    peer_ok = bool(signal.get("peer_consensus", True))
+    macro_day = bool(signal.get("macro_event_day", False))
+    sig_name = str(signal.get("signal") or "hold")
+
+    if not config.USE_AGENT:
+        approved = abs_score >= threshold and sig_name in ("buy", "sell")
+        return {
+            "approved": approved,
+            "reason": f"agent disabled — auto-{'approved' if approved else 'rejected'}",
+            "size_multiplier": 1.0,
+            "suggested_stop_pct": None,
+        }
+
+    approved = sig_name in ("buy", "sell") and abs_score >= threshold
+    if sig_name == "buy" and sentiment < 0:
+        approved = False
+    if sig_name == "buy" and not peer_ok:
+        approved = False
+
+    if for_exit:
+        if sig_name == "sell" and raw_score > threshold + 1 and regime_conf >= 0.5:
+            approved = False
+        if sig_name == "buy" and raw_score < -(threshold + 1) and regime_conf >= 0.5:
+            approved = False
+
+    size_multiplier = 1.0 + min(0.5, 0.12 * max(0, abs_score - threshold + 1) + 0.2 * regime_conf)
+    if macro_day:
+        size_multiplier -= 0.10
+    if sig_name == "buy" and sentiment > 0:
+        size_multiplier += 0.10
+    if sig_name == "buy" and sentiment < 0:
+        size_multiplier -= 0.20
+    size_multiplier = float(np.clip(size_multiplier, config.MIN_SIZE_MULTIPLIER, config.MAX_SIZE_MULTIPLIER))
+
+    suggested_stop_pct = None
+    if config.AGENT_DYNAMIC_STOPS:
+        price = float(signal.get("price") or 0.0)
+        atr = float(signal.get("atr") or 0.0)
+        realized_vol = float(signal.get("regime_realized_vol") or 0.0)
+        candidates: list[float] = []
+        if price > 0 and atr > 0:
+            candidates.append((1.5 * atr) / price)
+        if realized_vol > 0:
+            candidates.append(realized_vol * 2.5)
+        if candidates:
+            suggested_stop_pct = float(np.clip(np.mean(candidates), 0.02, 0.20))
+
+    reason_bits = ["surrogate"]
+    if macro_day:
+        reason_bits.append("macro_day")
+    if sentiment < 0 and sig_name == "buy":
+        reason_bits.append("negative_sentiment")
+    return {
+        "approved": approved,
+        "reason": ",".join(reason_bits),
+        "size_multiplier": size_multiplier,
+        "suggested_stop_pct": suggested_stop_pct,
     }
 
 
@@ -370,11 +622,10 @@ def _build_event_context(symbol: str, df: pd.DataFrame) -> dict:
     try:
         raw_news = events.fetch_news_range(
             symbols=[symbol],
-            keywords="earnings report quarterly results EPS guidance beat miss forecast",
             start=start_ts.isoformat(),
             end=end_ts.isoformat(),
             sort="asc",
-            max_items=max(50, min(500, len(df) * 2)),
+            max_items=max(100, min(600, len(df) * 3)),
         )
     except Exception:
         return {}
@@ -390,25 +641,86 @@ def _build_event_context(symbol: str, df: pd.DataFrame) -> dict:
         return {}
 
     stamped_news.sort(key=lambda item: item[0])
+    earnings_stamped = [
+        (ts, item)
+        for ts, item in stamped_news
+        if events.has_earnings_news([item], as_of=item.get("created"), max_age_days=365.0)
+    ]
     return {
-        "earnings_news_times": [ts for ts, _ in stamped_news],
-        "earnings_news": [item for _, item in stamped_news],
+        "news_times": [ts for ts, _ in stamped_news],
+        "news": [item for _, item in stamped_news],
+        "earnings_news_times": [ts for ts, _ in earnings_stamped],
+        "earnings_news": [item for _, item in earnings_stamped],
     }
 
 
-def _historical_news_before(event_context: dict[str, object] | None, ts: pd.Timestamp) -> list[dict]:
+def _build_market_event_context(df: pd.DataFrame) -> dict:
+    if df.empty:
+        return {}
+    start_ts = pd.Timestamp(df["t"].iloc[0]) - pd.Timedelta(days=7)
+    end_ts = pd.Timestamp(df["t"].iloc[-1]) + pd.Timedelta(days=1)
+    try:
+        raw_news = events.fetch_news_range(
+            keywords="inflation CPI Fed interest rates Federal Reserve FOMC Treasury yield war sanctions oil defense NATO",
+            start=start_ts.isoformat(),
+            end=end_ts.isoformat(),
+            sort="asc",
+            max_items=300,
+        )
+    except Exception:
+        return {}
+
+    stamped_news: list[tuple[pd.Timestamp, dict]] = []
+    for item in raw_news:
+        created_ts = _normalize_news_timestamp(item.get("created"))
+        if created_ts is None:
+            continue
+        stamped_news.append((created_ts, item))
+    stamped_news.sort(key=lambda item: item[0])
+    return {
+        "news_times": [ts for ts, _ in stamped_news],
+        "news": [item for _, item in stamped_news],
+    }
+
+
+def _historical_news_before(
+    event_context: dict[str, object] | None,
+    ts: pd.Timestamp,
+    time_key: str = "earnings_news_times",
+    news_key: str = "earnings_news",
+) -> list[dict]:
     if not event_context:
         return []
-    news_times = event_context.get("earnings_news_times", [])
-    earnings_news = event_context.get("earnings_news", [])
-    if not news_times or not earnings_news:
+    news_times = event_context.get(time_key) or event_context.get("news_times") or []
+    visible_news = event_context.get(news_key) or event_context.get("news") or []
+    if not news_times or not visible_news:
         return []
 
     ts_value = pd.Timestamp(ts)
     if ts_value.tzinfo is not None:
         ts_value = ts_value.tz_convert("UTC").tz_localize(None)
     idx = bisect_left(news_times, ts_value)
-    return earnings_news[:idx]
+    return list(visible_news[:idx])
+
+
+def _build_daily_blacklist_map(event_context: dict[str, object], dates: list[str]) -> dict[str, bool]:
+    if not event_context or not event_context.get("news"):
+        return {}
+    blacklist: dict[str, bool] = {}
+    for date_str in dates:
+        as_of = pd.Timestamp(f"{date_str} 00:00:00")
+        visible_news = _historical_news_before(event_context, as_of, time_key="news_times", news_key="news")
+        blacklist[date_str] = events.sentiment_trend_from_news(visible_news, as_of=as_of, max_age_days=7.0) < 0
+    return blacklist
+
+
+def _build_macro_day_map(market_context: dict[str, object], dates: list[str]) -> dict[str, bool]:
+    macro_map: dict[str, bool] = {}
+    for date_str in dates:
+        day = pd.Timestamp(date_str).date()
+        visible_news = _historical_news_before(market_context, pd.Timestamp(f"{date_str} 23:59:59"), time_key="news_times", news_key="news")
+        macro_map[date_str] = events.is_high_impact_macro_day_for_date(day, news=visible_news)
+    return macro_map
 
 
 def _apply_historical_signal_filters(
@@ -422,6 +734,12 @@ def _apply_historical_signal_filters(
         return signal
 
     ts = pd.Timestamp(bar["t"])
+    bar_date = ts.strftime("%Y-%m-%d")
+
+    if signal == "buy" and filter_context:
+        daily_blacklist = filter_context.get("daily_blacklist", {})
+        if daily_blacklist.get(bar_date):
+            return "hold"
 
     if signal == "buy" and timeframe in _TIMEFRAME_MINUTES and timeframe != "1Day":
         tod_ts = ts.tz_localize("America/New_York") if ts.tzinfo is None else ts
@@ -471,6 +789,8 @@ def _simulate(
     market_trend_by_date: dict[str, int] | None = None,
     filter_context: dict[str, object] | None = None,
     event_context: dict[str, object] | None = None,
+    market_event_context: dict[str, object] | None = None,
+    disabled_components: set[str] | None = None,
 ) -> tuple[list[dict], list[dict], float]:
     """
     Simulate trades on df.
@@ -479,40 +799,221 @@ def _simulate(
     When SPY is bearish, buy signals are suppressed via strategy.compute_signals(market_trend=-1).
     """
     warmup = warmup_override if warmup_override is not None else min(20, len(df) // 4)
+    filter_context = dict(filter_context or {})
+    date_strings = df["t"].dt.strftime("%Y-%m-%d").tolist()
+    if "daily_blacklist" not in filter_context:
+        filter_context["daily_blacklist"] = _build_daily_blacklist_map(event_context or {}, sorted(set(date_strings)))
+    if "macro_day" not in filter_context:
+        filter_context["macro_day"] = _build_macro_day_map(market_event_context or {}, sorted(set(date_strings)))
+
     cash = float(initial_cash)
-    position_qty = 0
+    position_qty = 0.0
+    position_side: str | None = None
     entry_px = 0.0
-    peak_px = 0.0       # Trailing stop: highest close since entry
-    entry_atr = 0.0     # ATR at entry time — used for partial scale-out target
-    partial_done = False  # True once the first 50% scale-out has been taken
+    trail_anchor_px = 0.0
+    entry_atr = 0.0
+    partial_done = False
     entry_date = ""
     entry_fee_remaining = 0.0
-    stop_cooldown = 0   # bars remaining before new entry allowed after a stop-loss
+    active_stop_pct = float(stop_loss_pct)
+    stop_cooldown = 0
+    exit_hold_count = 0
     _STOP_COOLDOWN_BARS = 3
+    last_order_at: dict[str, pd.Timestamp] = {}
+    risk_manager = risk.RiskManager()
+    close_history: dict[str, list[float]] = {symbol.upper(): []}
     trades: list[dict] = []
     equity_curve: list[dict] = []
+
+    def _mark_equity(mark_price: float) -> float:
+        return _equity_with_position(cash, position_side, position_qty, mark_price)
+
+    def _current_positions(mark_price: float) -> list[dict]:
+        if not position_side or position_qty <= 0:
+            return []
+        return [_position_snapshot(symbol, position_side, position_qty, mark_price, entry_px)]
+
+    def _historical_signal(window: pd.DataFrame, bar_row: pd.Series, threshold_value: int) -> dict:
+        bar_ts = pd.Timestamp(bar_row["t"])
+        bar_date = bar_ts.strftime("%Y-%m-%d")
+        mt = market_trend_by_date.get(bar_date, 0) if market_trend_by_date else 0
+        symbol_news = _historical_news_before(event_context, bar_ts, time_key="news_times", news_key="news")
+        earnings_news = _historical_news_before(event_context, bar_ts, time_key="earnings_news_times", news_key="earnings_news")
+        if not symbol_news:
+            symbol_news = list(earnings_news)
+        market_news = _historical_news_before(market_event_context, bar_ts, time_key="news_times", news_key="news")
+        earnings_soon = events.is_earnings_period_from_news(earnings_news, as_of=bar_row["t"]) if earnings_news else False
+        signal_kwargs = {
+            "market_trend": mt,
+            "earnings_soon": earnings_soon,
+            "threshold": threshold_value,
+            "timeframe": timeframe,
+        }
+        if disabled_components:
+            signal_kwargs["disabled_components"] = disabled_components
+        sig = strategy.compute_signals(
+            window.to_dict("records"),
+            **signal_kwargs,
+        )
+        event_result = events.get_historical_event_score(
+            symbol,
+            symbol_news,
+            as_of=bar_row["t"],
+            run_earnings=bool(earnings_news),
+            run_geo=True,
+            run_macro=True,
+            market_news=market_news,
+        )
+        if event_result["event_score"] != 0:
+            sig = strategy.apply_event_score(sig, event_result, threshold=threshold_value)
+        sig["sentiment_trend"] = events.sentiment_trend_from_news(symbol_news, as_of=bar_row["t"], max_age_days=7.0)
+        sig["macro_event_day"] = bool(filter_context.get("macro_day", {}).get(bar_date))
+        sig["peer_consensus"] = True
+        sig["curated_blacklist"] = bool(filter_context.get("daily_blacklist", {}).get(bar_date))
+        sig["signal"] = _apply_historical_signal_filters(
+            sig.get("signal") or _signal_for_threshold(int(sig.get("score") or 0), threshold_value),
+            window,
+            bar_row,
+            timeframe,
+            filter_context=filter_context,
+        )
+        return sig
 
     for i in range(warmup, len(df)):
         window = df.iloc[:i]
         bar = df.iloc[i]
         price = float(bar["c"])
-        ts = bar["t"].strftime("%Y-%m-%d %H:%M")
-        bar_date = ts[:10]  # "YYYY-MM-DD"
+        ts_value = pd.Timestamp(bar["t"])
+        ts = ts_value.strftime("%Y-%m-%d %H:%M")
+        bar_date = ts[:10]
+        macro_day = bool(filter_context.get("macro_day", {}).get(bar_date))
+        threshold_value = int(threshold) + (1 if macro_day else 0)
+        close_history[symbol.upper()] = window["c"].astype(float).tolist()
         exited_this_bar = False
 
-        # Tick down cooldown counter
+        account_before = _account_snapshot(cash, _mark_equity(price))
+        risk_manager.update_daily_loss_guard(account_before, now=ts_value.to_pydatetime())
+        risk_manager.evaluate_drawdown(account_before)
+
         if stop_cooldown > 0:
             stop_cooldown -= 1
 
-        # Intrabar risk exits use the trailing peak from completed bars only.
-        # We update peak_px after this bar is processed so the current close
-        # cannot tighten the stop before the same bar's high/low are evaluated.
-        if position_qty > 0:
-            exit_on_bar = _check_bar_exit(entry_px, peak_px, bar, stop_loss_pct, take_profit_pct)
+        if position_side and position_qty > 0:
+            exit_on_bar = _check_bar_exit(
+                entry_px,
+                trail_anchor_px,
+                bar,
+                active_stop_pct,
+                take_profit_pct,
+                side=position_side,
+            )
             if exit_on_bar is not None:
+                if (
+                    exit_on_bar[1] == "trailing_stop"
+                    and config.EXIT_REVIEW_ENABLED
+                    and config.USE_AGENT
+                    and exit_hold_count < config.MAX_EXIT_HOLDS
+                ):
+                    review_sig = _historical_signal(window, bar, threshold_value)
+                    score = int(review_sig.get("score") or 0)
+                    hold_review = (
+                        (position_side == "long" and score >= threshold_value + 1)
+                        or (position_side == "short" and score <= -(threshold_value + 1))
+                    )
+                    hold_review = hold_review and float(review_sig.get("regime_confidence") or 0.0) >= 0.5
+                    if hold_review:
+                        exit_hold_count += 1
+                        exit_on_bar = None
+                if exit_on_bar is not None:
+                    position_before_exit = position_qty
+                    raw_exit_px, reason = exit_on_bar
+                    fill_exit_px = _resolve_exit_fill(
+                        raw_exit_px,
+                        reason,
+                        bar,
+                        position_side,
+                        slippage_bps,
+                        position_qty,
+                    )
+                    if position_side == "long":
+                        cash += position_qty * fill_exit_px - fee_per_trade
+                    else:
+                        cash -= position_qty * fill_exit_px + fee_per_trade
+                    trade_fees, entry_fee_remaining = _allocate_trade_fees(
+                        entry_fee_remaining=entry_fee_remaining,
+                        exit_fee=fee_per_trade,
+                        qty_exiting=position_qty,
+                        position_qty_before_exit=position_before_exit,
+                    )
+                    trades.append(
+                        _make_trade(
+                            symbol=symbol,
+                            entry_px=entry_px,
+                            exit_px=fill_exit_px,
+                            qty=position_qty,
+                            entry_date=entry_date,
+                            exit_date=ts,
+                            exit_reason=reason,
+                            fees=trade_fees,
+                            side=position_side,
+                        )
+                    )
+                    position_qty = 0.0
+                    position_side = None
+                    entry_px = 0.0
+                    trail_anchor_px = 0.0
+                    entry_atr = 0.0
+                    partial_done = False
+                    entry_date = ""
+                    entry_fee_remaining = 0.0
+                    active_stop_pct = float(stop_loss_pct)
+                    exit_hold_count = 0
+                    if "stop" in reason:
+                        stop_cooldown = _STOP_COOLDOWN_BARS
+                    exited_this_bar = True
+
+        if exited_this_bar:
+            equity_curve.append({"date": ts, "equity": round(cash, 2)})
+            continue
+
+        sig = _historical_signal(window, bar, threshold_value)
+        signal = str(sig.get("signal") or "hold")
+
+        if position_side == "long" and position_qty >= 2 and not partial_done and entry_atr > 0:
+            partial_target = entry_px + 1.5 * entry_atr
+            if price >= partial_target:
                 position_before_exit = position_qty
-                raw_exit_px, reason = exit_on_bar
-                fill_exit_px = _apply_slippage(raw_exit_px, "sell", slippage_bps)
+                partial_qty = float(max(1.0, round(position_qty * 0.5, 0)))
+                if partial_qty < position_qty:
+                    fill_partial = _apply_slippage(price, "sell", slippage_bps, bar=bar, qty=partial_qty)
+                    cash += partial_qty * fill_partial - fee_per_trade
+                    trade_fees, entry_fee_remaining = _allocate_trade_fees(
+                        entry_fee_remaining=entry_fee_remaining,
+                        exit_fee=fee_per_trade,
+                        qty_exiting=partial_qty,
+                        position_qty_before_exit=position_before_exit,
+                    )
+                    trades.append(
+                        _make_trade(
+                            symbol=symbol,
+                            entry_px=entry_px,
+                            exit_px=fill_partial,
+                            qty=partial_qty,
+                            entry_date=entry_date,
+                            exit_date=ts,
+                            exit_reason="partial_profit",
+                            fees=trade_fees,
+                            side="long",
+                        )
+                    )
+                    position_qty -= partial_qty
+                    partial_done = True
+
+        if position_side == "long" and signal == "sell":
+            agent_result = _surrogate_agent_decision(sig, threshold_value, for_exit=True)
+            if agent_result["approved"]:
+                position_before_exit = position_qty
+                fill_exit_px = _apply_slippage(price, "sell", slippage_bps, bar=bar, qty=position_qty)
                 cash += position_qty * fill_exit_px - fee_per_trade
                 trade_fees, entry_fee_remaining = _allocate_trade_fees(
                     entry_fee_remaining=entry_fee_remaining,
@@ -528,141 +1029,127 @@ def _simulate(
                         qty=position_qty,
                         entry_date=entry_date,
                         exit_date=ts,
-                        exit_reason=reason,
+                        exit_reason="signal_exit",
                         fees=trade_fees,
+                        side="long",
                     )
                 )
-                position_qty = 0
+                position_qty = 0.0
+                position_side = None
                 entry_px = 0.0
-                peak_px = 0.0
+                trail_anchor_px = 0.0
                 entry_atr = 0.0
                 partial_done = False
                 entry_date = ""
                 entry_fee_remaining = 0.0
-                if "stop" in reason:
-                    stop_cooldown = _STOP_COOLDOWN_BARS
-                exited_this_bar = True
+                active_stop_pct = float(stop_loss_pct)
+                exit_hold_count = 0
 
-        # Market trend gate: look up SPY status for this bar's date
-        mt = 0
-        if market_trend_by_date:
-            mt = market_trend_by_date.get(bar_date, 0)
-
-        if exited_this_bar:
-            equity_curve.append({"date": ts, "equity": round(cash, 2)})
-            continue
-
-        historical_news = _historical_news_before(event_context, pd.Timestamp(bar["t"]))
-        earnings_soon = events.is_earnings_period_from_news(historical_news, as_of=bar["t"]) if historical_news else False
-
-        sig = strategy.compute_signals(
-            window.to_dict("records"),
-            market_trend=mt,
-            earnings_soon=earnings_soon,
-            threshold=threshold,
-            timeframe=timeframe,
-        )
-        if historical_news and events.has_earnings_news(historical_news, as_of=bar["t"]):
-            event_result = events.get_historical_event_score(
-                symbol,
-                historical_news,
-                as_of=bar["t"],
-                run_earnings=True,
-                run_geo=False,
-                run_macro=False,
-            )
-            sig = strategy.apply_event_score(sig, event_result, threshold=threshold)
-        signal = sig.get("signal") or _signal_for_threshold(int(sig.get("score") or 0), threshold)
-        signal = _apply_historical_signal_filters(signal, window, bar, timeframe, filter_context=filter_context)
-
-        # ------------------------------------------------------------------
-        # Partial scale-out: sell 50% when price reaches entry + 1.5×ATR.
-        # Locks in profit on half the position; trails the rest with stop.
-        # ------------------------------------------------------------------
-        if position_qty >= 2 and not partial_done and entry_atr > 0:
-            partial_target = entry_px + 1.5 * entry_atr
-            if price >= partial_target:
+        elif position_side == "short" and signal == "buy":
+            agent_result = _surrogate_agent_decision(sig, threshold_value, for_exit=True)
+            if agent_result["approved"]:
                 position_before_exit = position_qty
-                partial_qty = position_qty // 2
-                fill_partial = _apply_slippage(price, "sell", slippage_bps)
-                cash += partial_qty * fill_partial - fee_per_trade
+                fill_exit_px = _apply_slippage(price, "buy", slippage_bps, bar=bar, qty=position_qty)
+                cash -= position_qty * fill_exit_px + fee_per_trade
                 trade_fees, entry_fee_remaining = _allocate_trade_fees(
                     entry_fee_remaining=entry_fee_remaining,
                     exit_fee=fee_per_trade,
-                    qty_exiting=partial_qty,
+                    qty_exiting=position_qty,
                     position_qty_before_exit=position_before_exit,
                 )
                 trades.append(
                     _make_trade(
                         symbol=symbol,
                         entry_px=entry_px,
-                        exit_px=fill_partial,
-                        qty=partial_qty,
+                        exit_px=fill_exit_px,
+                        qty=position_qty,
                         entry_date=entry_date,
                         exit_date=ts,
-                        exit_reason="partial_profit",
+                        exit_reason="signal_exit",
                         fees=trade_fees,
+                        side="short",
                     )
                 )
-                position_qty -= partial_qty
-                partial_done = True
-
-        if signal == "buy" and position_qty == 0 and cash > price and stop_cooldown == 0:
-            qty = max(1, int((cash * config.MAX_POSITION_PCT) / price))
-            fill_entry_px = _apply_slippage(price, "buy", slippage_bps)
-            required_cash = qty * fill_entry_px + fee_per_trade
-            if cash >= required_cash:
-                cash -= required_cash
-                position_qty = qty
-                entry_px = fill_entry_px
-                peak_px = fill_entry_px
-                entry_atr = float(sig.get("atr") or 0.0)
+                position_qty = 0.0
+                position_side = None
+                entry_px = 0.0
+                trail_anchor_px = 0.0
+                entry_atr = 0.0
                 partial_done = False
-                entry_date = ts
-                entry_fee_remaining = float(fee_per_trade)
+                entry_date = ""
+                entry_fee_remaining = 0.0
+                active_stop_pct = float(stop_loss_pct)
+                exit_hold_count = 0
 
-        elif signal == "sell" and position_qty > 0:
-            position_before_exit = position_qty
-            fill_exit_px = _apply_slippage(price, "sell", slippage_bps)
-            cash += position_qty * fill_exit_px - fee_per_trade
-            trade_fees, entry_fee_remaining = _allocate_trade_fees(
-                entry_fee_remaining=entry_fee_remaining,
-                exit_fee=fee_per_trade,
-                qty_exiting=position_qty,
-                position_qty_before_exit=position_before_exit,
-            )
-            trades.append(
-                _make_trade(
-                    symbol=symbol,
-                    entry_px=entry_px,
-                    exit_px=fill_exit_px,
-                    qty=position_qty,
-                    entry_date=entry_date,
-                    exit_date=ts,
-                    exit_reason="signal_exit",
-                    fees=trade_fees,
-                )
-            )
-            position_qty = 0
-            entry_px = 0.0
-            peak_px = 0.0
-            entry_atr = 0.0
-            partial_done = False
-            entry_date = ""
-            entry_fee_remaining = 0.0
+        if position_side is None and stop_cooldown == 0 and signal in ("buy", "sell"):
+            wants_short = signal == "sell"
+            if wants_short and not config.ALLOW_SHORT:
+                signal = "hold"
+            if signal in ("buy", "sell"):
+                agent_result = _surrogate_agent_decision(sig, threshold_value)
+                if agent_result["approved"]:
+                    account = _account_snapshot(cash, _mark_equity(price))
+                    positions = _current_positions(price)
+                    ok, _, base_qty = _backtest_pre_trade_checks(
+                        symbol=symbol,
+                        side=signal,
+                        price=price,
+                        account=account,
+                        positions=positions,
+                        now=ts_value,
+                        last_order_at=last_order_at,
+                        close_history=close_history,
+                        atr=sig.get("atr"),
+                        realized_vol=sig.get("regime_realized_vol"),
+                        risk_manager=risk_manager,
+                    )
+                    if ok:
+                        qty = float(max(1.0, round(base_qty * agent_result["size_multiplier"], 0)))
+                        entry_side = "sell" if wants_short else "buy"
+                        fill_entry_px = _apply_slippage(price, entry_side, slippage_bps, bar=bar, qty=qty)
+                        required_cash = qty * fill_entry_px + fee_per_trade
+                        if wants_short:
+                            cash += qty * fill_entry_px - fee_per_trade
+                        else:
+                            if required_cash > cash:
+                                qty = float(max(0.0, np.floor((cash - fee_per_trade) / max(fill_entry_px, 1e-9))))
+                                if qty < 1:
+                                    qty = 0.0
+                            if qty > 0:
+                                fill_entry_px = _apply_slippage(price, entry_side, slippage_bps, bar=bar, qty=qty)
+                                cash -= qty * fill_entry_px + fee_per_trade
+                        if qty > 0:
+                            position_qty = qty
+                            position_side = "short" if wants_short else "long"
+                            entry_px = fill_entry_px
+                            trail_anchor_px = fill_entry_px
+                            entry_atr = float(sig.get("atr") or 0.0)
+                            partial_done = False
+                            entry_date = ts
+                            entry_fee_remaining = float(fee_per_trade)
+                            active_stop_pct = float(agent_result["suggested_stop_pct"] or stop_loss_pct)
+                            last_order_at[symbol.upper()] = ts_value
+                            exit_hold_count = 0
 
-        if position_qty > 0:
-            peak_px = max(peak_px, price)
+        if position_side == "long" and position_qty > 0:
+            trail_anchor_px = max(trail_anchor_px, price)
+        elif position_side == "short" and position_qty > 0:
+            trail_anchor_px = min(trail_anchor_px, price)
 
-        equity_curve.append({"date": ts, "equity": round(cash + position_qty * price, 2)})
+        equity_curve.append({"date": ts, "equity": round(_mark_equity(price), 2)})
 
     final_price = float(df["c"].iloc[-1])
+    final_bar = df.iloc[-1]
     final_ts = df["t"].iloc[-1].strftime("%Y-%m-%d %H:%M")
-    final_equity = cash + position_qty * final_price
-    if position_qty > 0:
+    final_equity = _mark_equity(final_price)
+    if position_side and position_qty > 0:
         position_before_exit = position_qty
-        fill_exit_px = _apply_slippage(final_price, "sell", slippage_bps)
-        cash += position_qty * fill_exit_px - fee_per_trade
+        exit_side = "sell" if position_side == "long" else "buy"
+        fill_exit_px = _apply_slippage(final_price, exit_side, slippage_bps, bar=final_bar, qty=position_qty)
+        if position_side == "long":
+            cash += position_qty * fill_exit_px - fee_per_trade
+        else:
+            cash -= position_qty * fill_exit_px + fee_per_trade
         trade_fees, entry_fee_remaining = _allocate_trade_fees(
             entry_fee_remaining=entry_fee_remaining,
             exit_fee=fee_per_trade,
@@ -679,6 +1166,7 @@ def _simulate(
                 exit_date=final_ts,
                 exit_reason="end_of_test",
                 fees=trade_fees,
+                side=position_side,
             )
         )
         final_equity = cash
@@ -766,6 +1254,11 @@ def _evaluate_parameters(
     event_context: dict[str, object] | None = None,
     warmup_override: int | None = None,
 ) -> dict:
+    market_event_context = None
+    disabled_components = None
+    if filter_context:
+        market_event_context = filter_context.get("market_event_context")
+        disabled_components = filter_context.get("disabled_components")
     trades, equity_curve, final_equity = _simulate(
         df=df,
         symbol=symbol,
@@ -780,6 +1273,8 @@ def _evaluate_parameters(
         market_trend_by_date=market_trend_by_date,
         filter_context=filter_context,
         event_context=event_context,
+        market_event_context=market_event_context,
+        disabled_components=disabled_components,
     )
     stats = _compute_stats(trades, initial_cash, final_equity, equity_curve, timeframe=timeframe)
     return {
@@ -850,11 +1345,12 @@ def run(
     timeframe: str = "1Day",
     initial_cash: float = 100_000,
     lookback_days: int | None = None,
+    bars: list[dict] | None = None,
 ) -> dict:
     days = lookback_days or _BT_LOOKBACK.get(timeframe, 365)
-    bars = broker.get_bars(symbol, timeframe=timeframe, lookback_days=days)
+    bar_rows = bars if bars is not None else broker.get_bars(symbol, timeframe=timeframe, lookback_days=days)
 
-    n = len(bars)
+    n = len(bar_rows)
     if n < 10:
         return {
             "error": (
@@ -863,12 +1359,13 @@ def run(
             )
         }
 
-    df = _prepare_df(bars)
+    df = _prepare_df(bar_rows)
 
     # Pre-build SPY trend dict for market regime gate (skip SPY itself)
     spy_trend = _build_spy_trend(timeframe, days) if symbol != "SPY" else {}
     filter_context = _build_filter_context(symbol, timeframe, days, df, market_trend_by_date=spy_trend)
     event_context = _build_event_context(symbol, df)
+    filter_context["market_event_context"] = _build_market_event_context(df)
 
     result = _evaluate_parameters(
         df=df,
@@ -895,6 +1392,8 @@ def run(
         "benchmark": benchmark,
         "slippage_bps": config.BACKTEST_SLIPPAGE_BPS,
         "fee_per_trade": config.BACKTEST_FEE_PER_TRADE,
+        "data_source": "provided_bars" if bars is not None else "broker_live_lookback",
+        "point_in_time_safe": bars is not None,
         **{
             k: v
             for k, v in result.items()
@@ -920,6 +1419,7 @@ def walk_forward(
     spy_trend = _build_spy_trend(timeframe, lookback_days) if symbol != "SPY" else {}
     filter_context = _build_filter_context(symbol, timeframe, lookback_days, df, market_trend_by_date=spy_trend)
     event_context = _build_event_context(symbol, df)
+    filter_context["market_event_context"] = _build_market_event_context(df)
 
     fold_size = n // n_splits
     folds = []
@@ -1030,6 +1530,7 @@ def walk_forward_expanding(
     spy_trend = _build_spy_trend(timeframe, lookback_days) if symbol != "SPY" else {}
     filter_context = _build_filter_context(symbol, timeframe, lookback_days, df, market_trend_by_date=spy_trend)
     event_context = _build_event_context(symbol, df)
+    filter_context["market_event_context"] = _build_market_event_context(df)
 
     min_train = max(20, int(n * min_train_pct))
     remaining = n - min_train
@@ -1132,6 +1633,7 @@ def optimize(
     spy_trend = _build_spy_trend(timeframe, lookback_days) if symbol != "SPY" else {}
     filter_context = _build_filter_context(symbol, timeframe, lookback_days, df, market_trend_by_date=spy_trend)
     event_context = _build_event_context(symbol, df)
+    filter_context["market_event_context"] = _build_market_event_context(df)
     split = max(30, int(len(df) * 0.7))
     if len(df) - split < 5:
         return {"error": "Need more data for train/validation optimisation split."}
@@ -1200,4 +1702,611 @@ def optimize(
         "train_bars": split,
         "validation_bars": len(df) - split,
         "results": results[:20],
+    }
+
+
+def _daily_close_frame(df: pd.DataFrame) -> pd.DataFrame:
+    daily = _resample_df(df, "1Day") if len(df) and df["t"].diff().dt.total_seconds().dropna().median() < 86400 else df.copy()
+    if daily.empty:
+        return pd.DataFrame(columns=["t", "c"])
+    out = daily[["t", "c"]].copy()
+    out["t"] = pd.to_datetime(out["t"])
+    out["c"] = out["c"].astype(float)
+    return out.sort_values("t").reset_index(drop=True)
+
+
+def _build_relative_strength_leaders(
+    symbol_dfs: dict[str, pd.DataFrame],
+    timeframe: str,
+    lookback_days: int,
+) -> dict[str, set[str]]:
+    del timeframe
+    tracked_symbols = [symbol for symbol in symbol_dfs if symbol.upper() != "SPY"]
+    if len(tracked_symbols) <= 1:
+        return {}
+
+    spy_df = symbol_dfs.get("SPY")
+    if spy_df is None or spy_df.empty:
+        try:
+            spy_df = _prepare_df(broker.get_bars("SPY", timeframe="1Day", lookback_days=max(30, lookback_days)))
+        except Exception:
+            return {}
+
+    daily_by_symbol = {symbol: _daily_close_frame(df) for symbol, df in symbol_dfs.items() if not df.empty}
+    spy_daily = _daily_close_frame(spy_df)
+    all_dates = sorted({ts.date() for df in daily_by_symbol.values() for ts in pd.to_datetime(df["t"])})
+    leaders_by_date: dict[str, set[str]] = {}
+
+    for day in all_dates:
+        spy_hist = spy_daily[spy_daily["t"].dt.date < day].tail(20)
+        if len(spy_hist) < 20:
+            continue
+        spy_ret = float(spy_hist["c"].iloc[-1] / spy_hist["c"].iloc[0] - 1.0)
+        ranked: list[tuple[str, float]] = []
+        for symbol in tracked_symbols:
+            daily_df = daily_by_symbol.get(symbol)
+            if daily_df is None or daily_df.empty:
+                continue
+            hist = daily_df[daily_df["t"].dt.date < day].tail(20)
+            if len(hist) < 20:
+                ranked.append((symbol, 0.0))
+                continue
+            sym_ret = float(hist["c"].iloc[-1] / hist["c"].iloc[0] - 1.0)
+            ranked.append((symbol, sym_ret - spy_ret))
+        if not ranked:
+            continue
+        ranked.sort(key=lambda item: item[1], reverse=True)
+        keep = max(2, int(len(ranked) * 0.6)) if len(ranked) >= 2 else 1
+        leaders_by_date[day.isoformat()] = {symbol for symbol, _ in ranked[:keep]}
+    return leaders_by_date
+
+
+def run_portfolio(
+    symbols: list[str],
+    timeframe: str = "1Day",
+    initial_cash: float = 100_000,
+    lookback_days: int | None = None,
+    bars_by_symbol: dict[str, list[dict]] | None = None,
+    daily_watchlist_by_date: dict[str, list[str]] | None = None,
+) -> dict:
+    days = lookback_days or _BT_LOOKBACK.get(timeframe, 365)
+    unique_symbols = list(dict.fromkeys(symbol.upper() for symbol in symbols))
+    if not unique_symbols:
+        return {"error": "No symbols supplied."}
+
+    symbol_dfs: dict[str, pd.DataFrame] = {}
+    for symbol in unique_symbols:
+        bars = (bars_by_symbol or {}).get(symbol)
+        if bars is None:
+            bars = broker.get_bars(symbol, timeframe=timeframe, lookback_days=days)
+        if not bars:
+            continue
+        symbol_dfs[symbol] = _prepare_df(bars)
+    if not symbol_dfs:
+        return {"error": "No bars available for portfolio backtest."}
+
+    union_df = pd.concat([df.assign(symbol=symbol) for symbol, df in symbol_dfs.items()], ignore_index=True).sort_values("t")
+    market_event_context = _build_market_event_context(union_df)
+    spy_trend = _build_spy_trend(timeframe, days)
+    leader_map = {
+        date_str: {symbol.upper() for symbol in members}
+        for date_str, members in (daily_watchlist_by_date or {}).items()
+    }
+    if not leader_map:
+        leader_map = _build_relative_strength_leaders(symbol_dfs, timeframe, days)
+
+    filter_contexts: dict[str, dict] = {}
+    event_contexts: dict[str, dict] = {}
+    states: dict[str, dict] = {}
+    close_history: dict[str, list[float]] = {symbol: [] for symbol in symbol_dfs}
+    last_price: dict[str, float] = {
+        symbol: float(df["c"].iloc[0]) for symbol, df in symbol_dfs.items() if not df.empty
+    }
+    event_queue: list[tuple[pd.Timestamp, str, int]] = []
+
+    for symbol, df in symbol_dfs.items():
+        warmup = min(20, len(df) // 4)
+        for idx in range(warmup, len(df)):
+            event_queue.append((pd.Timestamp(df["t"].iloc[idx]), symbol, idx))
+        event_context = _build_event_context(symbol, df)
+        dates = sorted(set(df["t"].dt.strftime("%Y-%m-%d")))
+        filter_context = _build_filter_context(symbol, timeframe, days, df, market_trend_by_date=spy_trend)
+        filter_context["daily_blacklist"] = _build_daily_blacklist_map(event_context, dates)
+        filter_context["macro_day"] = _build_macro_day_map(market_event_context, dates)
+        filter_context["market_event_context"] = market_event_context
+        filter_contexts[symbol] = filter_context
+        event_contexts[symbol] = event_context
+        states[symbol] = {
+            "qty": 0.0,
+            "side": None,
+            "entry_px": 0.0,
+            "trail_anchor_px": 0.0,
+            "entry_atr": 0.0,
+            "partial_done": False,
+            "entry_date": "",
+            "entry_fee_remaining": 0.0,
+            "active_stop_pct": float(config.STOP_LOSS_PCT),
+            "stop_cooldown": 0,
+            "exit_hold_count": 0,
+        }
+
+    event_queue.sort(key=lambda item: (item[0], item[1]))
+    cash = float(initial_cash)
+    risk_manager = risk.RiskManager()
+    last_order_at: dict[str, pd.Timestamp] = {}
+    trades: list[dict] = []
+    equity_curve: list[dict] = []
+
+    def _portfolio_positions() -> list[dict]:
+        rows: list[dict] = []
+        for symbol, state in states.items():
+            if not state["side"] or state["qty"] <= 0:
+                continue
+            rows.append(
+                _position_snapshot(
+                    symbol,
+                    state["side"],
+                    state["qty"],
+                    last_price.get(symbol, state["entry_px"]),
+                    state["entry_px"],
+                )
+            )
+        return rows
+
+    def _portfolio_equity() -> float:
+        equity = cash
+        for symbol, state in states.items():
+            if state["side"] and state["qty"] > 0:
+                equity += _mark_to_market_value(state["side"], state["qty"], last_price.get(symbol, state["entry_px"]))
+        return float(equity)
+
+    def _historical_signal(symbol: str, window: pd.DataFrame, bar_row: pd.Series, threshold_value: int) -> dict:
+        filter_context = filter_contexts[symbol]
+        event_context = event_contexts[symbol]
+        bar_ts = pd.Timestamp(bar_row["t"])
+        bar_date = bar_ts.strftime("%Y-%m-%d")
+        mt = spy_trend.get(bar_date, 0)
+        symbol_news = _historical_news_before(event_context, bar_ts, time_key="news_times", news_key="news")
+        earnings_news = _historical_news_before(event_context, bar_ts, time_key="earnings_news_times", news_key="earnings_news")
+        if not symbol_news:
+            symbol_news = list(earnings_news)
+        market_news = _historical_news_before(market_event_context, bar_ts, time_key="news_times", news_key="news")
+        earnings_soon = events.is_earnings_period_from_news(earnings_news, as_of=bar_row["t"]) if earnings_news else False
+        sig = strategy.compute_signals(
+            window.to_dict("records"),
+            market_trend=mt,
+            earnings_soon=earnings_soon,
+            threshold=threshold_value,
+            timeframe=timeframe,
+        )
+        event_result = events.get_historical_event_score(
+            symbol,
+            symbol_news,
+            as_of=bar_row["t"],
+            run_earnings=bool(earnings_news),
+            run_geo=True,
+            run_macro=True,
+            market_news=market_news,
+        )
+        if event_result["event_score"] != 0:
+            sig = strategy.apply_event_score(sig, event_result, threshold=threshold_value)
+        sig["sentiment_trend"] = events.sentiment_trend_from_news(symbol_news, as_of=bar_row["t"], max_age_days=7.0)
+        sig["macro_event_day"] = bool(filter_context.get("macro_day", {}).get(bar_date))
+        sig["peer_consensus"] = True
+        sig["signal"] = _apply_historical_signal_filters(
+            sig.get("signal") or _signal_for_threshold(int(sig.get("score") or 0), threshold_value),
+            window,
+            bar_row,
+            timeframe,
+            filter_context=filter_context,
+        )
+        return sig
+
+    for ts_value, symbol, idx in event_queue:
+        df = symbol_dfs[symbol]
+        state = states[symbol]
+        window = df.iloc[:idx]
+        bar = df.iloc[idx]
+        price = float(bar["c"])
+        last_price[symbol] = price
+        close_history[symbol] = window["c"].astype(float).tolist()
+
+        ts = ts_value.strftime("%Y-%m-%d %H:%M")
+        bar_date = ts[:10]
+        threshold_value = strategy._resolve_signal_threshold(timeframe, None) + (
+            1 if filter_contexts[symbol].get("macro_day", {}).get(bar_date) else 0
+        )
+        account = _account_snapshot(cash, _portfolio_equity())
+        risk_manager.update_daily_loss_guard(account, now=ts_value.to_pydatetime())
+        risk_manager.evaluate_drawdown(account)
+
+        if state["stop_cooldown"] > 0:
+            state["stop_cooldown"] -= 1
+
+        exited_this_bar = False
+        if state["side"] and state["qty"] > 0:
+            exit_on_bar = _check_bar_exit(
+                state["entry_px"],
+                state["trail_anchor_px"],
+                bar,
+                state["active_stop_pct"],
+                config.TAKE_PROFIT_PCT,
+                side=state["side"],
+            )
+            if exit_on_bar is not None:
+                if (
+                    exit_on_bar[1] == "trailing_stop"
+                    and config.EXIT_REVIEW_ENABLED
+                    and config.USE_AGENT
+                    and state["exit_hold_count"] < config.MAX_EXIT_HOLDS
+                ):
+                    review_sig = _historical_signal(symbol, window, bar, threshold_value)
+                    score = int(review_sig.get("score") or 0)
+                    hold_review = (
+                        (state["side"] == "long" and score >= threshold_value + 1)
+                        or (state["side"] == "short" and score <= -(threshold_value + 1))
+                    )
+                    hold_review = hold_review and float(review_sig.get("regime_confidence") or 0.0) >= 0.5
+                    if hold_review:
+                        state["exit_hold_count"] += 1
+                        exit_on_bar = None
+                if exit_on_bar is not None:
+                    raw_exit_px, reason = exit_on_bar
+                    fill_exit_px = _resolve_exit_fill(
+                        raw_exit_px,
+                        reason,
+                        bar,
+                        state["side"],
+                        config.BACKTEST_SLIPPAGE_BPS,
+                        state["qty"],
+                    )
+                    if state["side"] == "long":
+                        cash += state["qty"] * fill_exit_px - config.BACKTEST_FEE_PER_TRADE
+                    else:
+                        cash -= state["qty"] * fill_exit_px + config.BACKTEST_FEE_PER_TRADE
+                    trade_fees, state["entry_fee_remaining"] = _allocate_trade_fees(
+                        entry_fee_remaining=state["entry_fee_remaining"],
+                        exit_fee=config.BACKTEST_FEE_PER_TRADE,
+                        qty_exiting=state["qty"],
+                        position_qty_before_exit=state["qty"],
+                    )
+                    trades.append(
+                        _make_trade(
+                            symbol=symbol,
+                            entry_px=state["entry_px"],
+                            exit_px=fill_exit_px,
+                            qty=state["qty"],
+                            entry_date=state["entry_date"],
+                            exit_date=ts,
+                            exit_reason=reason,
+                            fees=trade_fees,
+                            side=state["side"],
+                        )
+                    )
+                    state.update(
+                        {
+                            "qty": 0.0,
+                            "side": None,
+                            "entry_px": 0.0,
+                            "trail_anchor_px": 0.0,
+                            "entry_atr": 0.0,
+                            "partial_done": False,
+                            "entry_date": "",
+                            "entry_fee_remaining": 0.0,
+                            "active_stop_pct": float(config.STOP_LOSS_PCT),
+                            "exit_hold_count": 0,
+                        }
+                    )
+                    if "stop" in reason:
+                        state["stop_cooldown"] = 3
+                    exited_this_bar = True
+
+        if exited_this_bar:
+            equity_curve.append({"date": ts, "equity": round(_portfolio_equity(), 2)})
+            continue
+
+        sig = _historical_signal(symbol, window, bar, threshold_value)
+        signal = str(sig.get("signal") or "hold")
+
+        if state["side"] == "long" and state["qty"] >= 2 and not state["partial_done"] and state["entry_atr"] > 0:
+            partial_target = state["entry_px"] + 1.5 * state["entry_atr"]
+            if price >= partial_target:
+                partial_qty = float(max(1.0, round(state["qty"] * 0.5, 0)))
+                if partial_qty < state["qty"]:
+                    fill_partial = _apply_slippage(price, "sell", config.BACKTEST_SLIPPAGE_BPS, bar=bar, qty=partial_qty)
+                    cash += partial_qty * fill_partial - config.BACKTEST_FEE_PER_TRADE
+                    trade_fees, state["entry_fee_remaining"] = _allocate_trade_fees(
+                        entry_fee_remaining=state["entry_fee_remaining"],
+                        exit_fee=config.BACKTEST_FEE_PER_TRADE,
+                        qty_exiting=partial_qty,
+                        position_qty_before_exit=state["qty"],
+                    )
+                    trades.append(
+                        _make_trade(
+                            symbol=symbol,
+                            entry_px=state["entry_px"],
+                            exit_px=fill_partial,
+                            qty=partial_qty,
+                            entry_date=state["entry_date"],
+                            exit_date=ts,
+                            exit_reason="partial_profit",
+                            fees=trade_fees,
+                            side="long",
+                        )
+                    )
+                    state["qty"] -= partial_qty
+                    state["partial_done"] = True
+
+        if state["side"] == "long" and signal == "sell":
+            agent_result = _surrogate_agent_decision(sig, threshold_value, for_exit=True)
+            if agent_result["approved"]:
+                fill_exit_px = _apply_slippage(price, "sell", config.BACKTEST_SLIPPAGE_BPS, bar=bar, qty=state["qty"])
+                cash += state["qty"] * fill_exit_px - config.BACKTEST_FEE_PER_TRADE
+                trade_fees, state["entry_fee_remaining"] = _allocate_trade_fees(
+                    entry_fee_remaining=state["entry_fee_remaining"],
+                    exit_fee=config.BACKTEST_FEE_PER_TRADE,
+                    qty_exiting=state["qty"],
+                    position_qty_before_exit=state["qty"],
+                )
+                trades.append(
+                    _make_trade(
+                        symbol=symbol,
+                        entry_px=state["entry_px"],
+                        exit_px=fill_exit_px,
+                        qty=state["qty"],
+                        entry_date=state["entry_date"],
+                        exit_date=ts,
+                        exit_reason="signal_exit",
+                        fees=trade_fees,
+                        side="long",
+                    )
+                )
+                state.update(
+                    {
+                        "qty": 0.0,
+                        "side": None,
+                        "entry_px": 0.0,
+                        "trail_anchor_px": 0.0,
+                        "entry_atr": 0.0,
+                        "partial_done": False,
+                        "entry_date": "",
+                        "entry_fee_remaining": 0.0,
+                        "active_stop_pct": float(config.STOP_LOSS_PCT),
+                        "exit_hold_count": 0,
+                    }
+                )
+
+        elif state["side"] == "short" and signal == "buy":
+            agent_result = _surrogate_agent_decision(sig, threshold_value, for_exit=True)
+            if agent_result["approved"]:
+                fill_exit_px = _apply_slippage(price, "buy", config.BACKTEST_SLIPPAGE_BPS, bar=bar, qty=state["qty"])
+                cash -= state["qty"] * fill_exit_px + config.BACKTEST_FEE_PER_TRADE
+                trade_fees, state["entry_fee_remaining"] = _allocate_trade_fees(
+                    entry_fee_remaining=state["entry_fee_remaining"],
+                    exit_fee=config.BACKTEST_FEE_PER_TRADE,
+                    qty_exiting=state["qty"],
+                    position_qty_before_exit=state["qty"],
+                )
+                trades.append(
+                    _make_trade(
+                        symbol=symbol,
+                        entry_px=state["entry_px"],
+                        exit_px=fill_exit_px,
+                        qty=state["qty"],
+                        entry_date=state["entry_date"],
+                        exit_date=ts,
+                        exit_reason="signal_exit",
+                        fees=trade_fees,
+                        side="short",
+                    )
+                )
+                state.update(
+                    {
+                        "qty": 0.0,
+                        "side": None,
+                        "entry_px": 0.0,
+                        "trail_anchor_px": 0.0,
+                        "entry_atr": 0.0,
+                        "partial_done": False,
+                        "entry_date": "",
+                        "entry_fee_remaining": 0.0,
+                        "active_stop_pct": float(config.STOP_LOSS_PCT),
+                        "exit_hold_count": 0,
+                    }
+                )
+
+        eligible_symbols = leader_map.get(bar_date)
+        can_enter_symbol = eligible_symbols is None or symbol in eligible_symbols
+        if state["side"] is None and state["stop_cooldown"] == 0 and can_enter_symbol and signal in ("buy", "sell"):
+            wants_short = signal == "sell"
+            if not wants_short or config.ALLOW_SHORT:
+                agent_result = _surrogate_agent_decision(sig, threshold_value)
+                if agent_result["approved"]:
+                    account = _account_snapshot(cash, _portfolio_equity())
+                    positions = _portfolio_positions()
+                    ok, _, base_qty = _backtest_pre_trade_checks(
+                        symbol=symbol,
+                        side=signal,
+                        price=price,
+                        account=account,
+                        positions=positions,
+                        now=ts_value,
+                        last_order_at=last_order_at,
+                        close_history=close_history,
+                        atr=sig.get("atr"),
+                        realized_vol=sig.get("regime_realized_vol"),
+                        risk_manager=risk_manager,
+                    )
+                    if ok:
+                        qty = float(max(1.0, round(base_qty * agent_result["size_multiplier"], 0)))
+                        entry_side = "sell" if wants_short else "buy"
+                        fill_entry_px = _apply_slippage(price, entry_side, config.BACKTEST_SLIPPAGE_BPS, bar=bar, qty=qty)
+                        required_cash = qty * fill_entry_px + config.BACKTEST_FEE_PER_TRADE
+                        if wants_short:
+                            cash += qty * fill_entry_px - config.BACKTEST_FEE_PER_TRADE
+                        else:
+                            if required_cash > cash:
+                                qty = float(max(0.0, np.floor((cash - config.BACKTEST_FEE_PER_TRADE) / max(fill_entry_px, 1e-9))))
+                                if qty < 1:
+                                    qty = 0.0
+                            if qty > 0:
+                                fill_entry_px = _apply_slippage(price, entry_side, config.BACKTEST_SLIPPAGE_BPS, bar=bar, qty=qty)
+                                cash -= qty * fill_entry_px + config.BACKTEST_FEE_PER_TRADE
+                        if qty > 0:
+                            state.update(
+                                {
+                                    "qty": qty,
+                                    "side": "short" if wants_short else "long",
+                                    "entry_px": fill_entry_px,
+                                    "trail_anchor_px": fill_entry_px,
+                                    "entry_atr": float(sig.get("atr") or 0.0),
+                                    "partial_done": False,
+                                    "entry_date": ts,
+                                    "entry_fee_remaining": float(config.BACKTEST_FEE_PER_TRADE),
+                                    "active_stop_pct": float(agent_result["suggested_stop_pct"] or config.STOP_LOSS_PCT),
+                                    "exit_hold_count": 0,
+                                }
+                            )
+                            last_order_at[symbol] = ts_value
+
+        if state["side"] == "long" and state["qty"] > 0:
+            state["trail_anchor_px"] = max(state["trail_anchor_px"], price)
+        elif state["side"] == "short" and state["qty"] > 0:
+            state["trail_anchor_px"] = min(state["trail_anchor_px"], price)
+
+        equity_curve.append({"date": ts, "equity": round(_portfolio_equity(), 2)})
+
+    if not event_queue:
+        return {"error": "No eligible bars available for portfolio simulation."}
+
+    final_ts = event_queue[-1][0].strftime("%Y-%m-%d %H:%M")
+    for symbol, state in states.items():
+        if not state["side"] or state["qty"] <= 0:
+            continue
+        fill_exit_px = _apply_slippage(
+            last_price.get(symbol, state["entry_px"]),
+            "sell" if state["side"] == "long" else "buy",
+            config.BACKTEST_SLIPPAGE_BPS,
+            qty=state["qty"],
+        )
+        if state["side"] == "long":
+            cash += state["qty"] * fill_exit_px - config.BACKTEST_FEE_PER_TRADE
+        else:
+            cash -= state["qty"] * fill_exit_px + config.BACKTEST_FEE_PER_TRADE
+        trade_fees, state["entry_fee_remaining"] = _allocate_trade_fees(
+            entry_fee_remaining=state["entry_fee_remaining"],
+            exit_fee=config.BACKTEST_FEE_PER_TRADE,
+            qty_exiting=state["qty"],
+            position_qty_before_exit=state["qty"],
+        )
+        trades.append(
+            _make_trade(
+                symbol=symbol,
+                entry_px=state["entry_px"],
+                exit_px=fill_exit_px,
+                qty=state["qty"],
+                entry_date=state["entry_date"],
+                exit_date=final_ts,
+                exit_reason="end_of_test",
+                fees=trade_fees,
+                side=state["side"],
+            )
+        )
+        state["qty"] = 0.0
+        state["side"] = None
+
+    final_equity = cash
+    final_point = {"date": final_ts, "equity": round(final_equity, 2)}
+    if equity_curve and equity_curve[-1]["date"] == final_ts:
+        equity_curve[-1] = final_point
+    else:
+        equity_curve.append(final_point)
+
+    stats = _compute_stats(trades, initial_cash, final_equity, equity_curve, timeframe=timeframe)
+    return {
+        "symbols": unique_symbols,
+        "timeframe": timeframe,
+        "initial_cash": initial_cash,
+        "final_equity": round(final_equity, 2),
+        "total_trades": len(trades),
+        "trades": trades,
+        "equity_curve": equity_curve,
+        "benchmark": _spy_benchmark(timeframe, days, initial_cash),
+        "selection_map": {date_str: sorted(list(members)) for date_str, members in leader_map.items()},
+        "data_source": "provided_bars" if bars_by_symbol is not None else "broker_live_lookback",
+        "point_in_time_safe": bars_by_symbol is not None or daily_watchlist_by_date is not None,
+        **stats,
+    }
+
+
+def ablation_report(
+    symbol: str,
+    timeframe: str = "1Day",
+    lookback_days: int | None = None,
+    initial_cash: float = 100_000,
+    components: list[str] | None = None,
+) -> dict:
+    days = lookback_days or _BT_LOOKBACK.get(timeframe, 365)
+    bars = broker.get_bars(symbol, timeframe=timeframe, lookback_days=days)
+    if len(bars) < 30:
+        return {"error": f"Only {len(bars)} bars - need at least 30 for ablation."}
+
+    df = _prepare_df(bars)
+    spy_trend = _build_spy_trend(timeframe, days) if symbol != "SPY" else {}
+    base_filter = _build_filter_context(symbol, timeframe, days, df, market_trend_by_date=spy_trend)
+    event_context = _build_event_context(symbol, df)
+    base_filter["market_event_context"] = _build_market_event_context(df)
+
+    base = _evaluate_parameters(
+        df=df,
+        symbol=symbol,
+        timeframe=timeframe,
+        initial_cash=initial_cash,
+        threshold=strategy._resolve_signal_threshold(timeframe, None),
+        stop_loss_pct=config.STOP_LOSS_PCT,
+        take_profit_pct=config.TAKE_PROFIT_PCT,
+        market_trend_by_date=spy_trend,
+        filter_context=base_filter,
+        event_context=event_context,
+    )
+
+    component_list = components or ["rsi", "macd", "ema", "bb", "volume", "momentum", "breakout", "supertrend", "vwap"]
+    ablations = []
+    for component in component_list:
+        filter_context = dict(base_filter)
+        filter_context["disabled_components"] = {component}
+        result = _evaluate_parameters(
+            df=df,
+            symbol=symbol,
+            timeframe=timeframe,
+            initial_cash=initial_cash,
+            threshold=strategy._resolve_signal_threshold(timeframe, None),
+            stop_loss_pct=config.STOP_LOSS_PCT,
+            take_profit_pct=config.TAKE_PROFIT_PCT,
+            market_trend_by_date=spy_trend,
+            filter_context=filter_context,
+            event_context=event_context,
+        )
+        ablations.append(
+            {
+                "component": component,
+                "return_pct": result["total_return_pct"],
+                "return_delta_pct": round(result["total_return_pct"] - base["total_return_pct"], 2),
+                "sharpe": result["sharpe"],
+                "sharpe_delta": round(result["sharpe"] - base["sharpe"], 3),
+                "trades": result["trades"],
+                "trade_delta": int(result["trades"] - base["trades"]),
+            }
+        )
+
+    ablations.sort(key=lambda item: (item["return_delta_pct"], item["sharpe_delta"]))
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "base": {
+            "return_pct": base["total_return_pct"],
+            "sharpe": base["sharpe"],
+            "trades": base["trades"],
+        },
+        "ablations": ablations,
     }

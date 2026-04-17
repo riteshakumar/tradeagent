@@ -1,6 +1,7 @@
 """Unit tests for events.py — keyword sentiment and macro day detection."""
 from __future__ import annotations
 
+from datetime import date
 from unittest.mock import patch
 
 import config
@@ -83,6 +84,11 @@ def test_macro_day_disabled_by_config(monkeypatch):
         "FOMC rate decision today",
     )):
         assert events.is_high_impact_macro_day() is False
+
+
+def test_macro_day_recurring_pattern_extends_calendar(monkeypatch):
+    monkeypatch.setattr(config, "MACRO_SUPPRESSION_ENABLED", True)
+    assert events.is_high_impact_macro_day_for_date(date(2027, 1, 1), news=[]) is True
 
 
 # ── is_earnings_period ─────────────────────────────────────────────────────────

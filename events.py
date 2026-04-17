@@ -11,7 +11,7 @@ Score is added on top of the quant score in strategy.py.
 """
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import requests
 import config
 
@@ -44,6 +44,10 @@ _EARNINGS_UPCOMING_PATTERNS = (
     "earnings call", "q1 earnings", "q2 earnings",
     "q3 earnings", "q4 earnings", "fiscal", "announces results",
 )
+_GEOPOLITICAL_KW = frozenset([
+    "war", "conflict", "sanctions", "missile", "attack", "opec", "oil",
+    "shipping", "strait", "hormuz", "defense", "military", "nato",
+])
 
 
 # ── News fetcher ───────────────────────────────────────────────────────────────
@@ -171,6 +175,23 @@ def _visible_news(
                     continue
         visible.append(item)
     return visible
+
+
+def _news_text(item: dict) -> str:
+    return (item.get("headline", "") + " " + item.get("summary", "")).lower()
+
+
+def _keyword_sentiment_score(
+    news: list[dict],
+    as_of: datetime | str | None = None,
+    max_age_days: float | None = None,
+) -> tuple[int, int]:
+    pos = neg = 0
+    for item in _visible_news(news, as_of=as_of, max_age_days=max_age_days):
+        text = _news_text(item)
+        pos += sum(1 for kw in _POS_KW if kw in text)
+        neg += sum(1 for kw in _NEG_KW if kw in text)
+    return pos, neg
 
 
 def has_earnings_news(
@@ -436,6 +457,32 @@ _KNOWN_MACRO_DATES: frozenset[date] = frozenset([
     date(2026, 1, 9), date(2026, 2, 6), date(2026, 3, 6),
     date(2026, 4, 3), date(2026, 5, 1), date(2026, 6, 5),
 ])
+_MAX_KNOWN_MACRO_DATE = max(_KNOWN_MACRO_DATES)
+
+
+def _nth_weekday_of_month(year: int, month: int, weekday: int, occurrence: int) -> date:
+    current = date(year, month, 1)
+    matches = 0
+    while current.month == month:
+        if current.weekday() == weekday:
+            matches += 1
+            if matches == occurrence:
+                return current
+        current += timedelta(days=1)
+    raise ValueError("weekday occurrence not found")
+
+
+def _is_recurring_macro_release_day(day: date) -> bool:
+    """
+    Conservative fallback once the hardcoded calendar runs out.
+    Uses recurring release patterns for NFP (first Friday) and CPI (second Wednesday).
+    """
+    try:
+        first_friday = _nth_weekday_of_month(day.year, day.month, weekday=4, occurrence=1)
+        second_wednesday = _nth_weekday_of_month(day.year, day.month, weekday=2, occurrence=2)
+    except ValueError:
+        return False
+    return day in {first_friday, second_wednesday}
 
 
 def sentiment_trend(symbol: str) -> int:
@@ -446,21 +493,25 @@ def sentiment_trend(symbol: str) -> int:
     """
     try:
         news = fetch_news(symbols=[symbol], limit=20)
-        pos = neg = 0
-        for n in news:
-            text = (n.get("headline", "") + " " + n.get("summary", "")).lower()
-            pos += sum(1 for kw in _POS_KW if kw in text)
-            neg += sum(1 for kw in _NEG_KW if kw in text)
-        if pos == 0 and neg == 0:
-            return 0
-        net = pos - neg
-        if net >= 2:
-            return 1
-        if net <= -2:
-            return -1
-        return 0
+        return sentiment_trend_from_news(news)
     except Exception:
         return 0
+
+
+def sentiment_trend_from_news(
+    news: list[dict],
+    as_of: datetime | str | None = None,
+    max_age_days: float = 7.0,
+) -> int:
+    pos, neg = _keyword_sentiment_score(news, as_of=as_of, max_age_days=max_age_days)
+    if pos == 0 and neg == 0:
+        return 0
+    net = pos - neg
+    if net >= 2:
+        return 1
+    if net <= -2:
+        return -1
+    return 0
 
 
 def is_high_impact_macro_day() -> bool:
@@ -474,6 +525,9 @@ def is_high_impact_macro_day() -> bool:
     if today in _KNOWN_MACRO_DATES:
         log.info("Macro calendar hit: %s is a known high-impact event date", today)
         return True
+    if today > _MAX_KNOWN_MACRO_DATE and _is_recurring_macro_release_day(today):
+        log.info("Macro recurring-date hit: %s matches a scheduled release pattern", today)
+        return True
     try:
         news = fetch_news(limit=15)  # broad market, no symbol filter
         for n in news:
@@ -483,6 +537,30 @@ def is_high_impact_macro_day() -> bool:
         return False
     except Exception:
         return False
+
+
+def is_high_impact_macro_day_for_date(day: date, news: list[dict] | None = None) -> bool:
+    """
+    Historical-safe macro-day helper used by backtests.
+    """
+    if not config.MACRO_SUPPRESSION_ENABLED:
+        return False
+    if day in _KNOWN_MACRO_DATES:
+        return True
+    if day > _MAX_KNOWN_MACRO_DATE and _is_recurring_macro_release_day(day):
+        return True
+    if not news:
+        return False
+
+    day_end = datetime.combine(day, datetime.min.time()) + timedelta(days=1)
+    for item in _visible_news(news, as_of=day_end, max_age_days=2.0):
+        created_dt = _coerce_datetime(item.get("created"))
+        if created_dt is not None and created_dt.date() > day:
+            continue
+        text = _news_text(item)
+        if any(kw in text for kw in _MACRO_KW):
+            return True
+    return False
 
 
 # ── Unified event score for a symbol ──────────────────────────────────────────
@@ -569,6 +647,75 @@ def _historical_earnings_signal(
     }
 
 
+def _historical_geopolitical_signal(
+    symbol: str,
+    news: list[dict],
+    as_of: datetime | str | None = None,
+) -> dict:
+    if not any(symbol in tickers for tickers in SECTOR_MAP["geopolitical"].values()):
+        return {"score": 0, "reason": "not a geopolitical-sensitive stock", "confidence": "low", "event_type": "geopolitical"}
+
+    relevant = []
+    for item in _visible_news(news, as_of=as_of, max_age_days=7.0):
+        text = _news_text(item)
+        if any(kw in text for kw in _GEOPOLITICAL_KW):
+            relevant.append(item)
+    if not relevant:
+        return {"score": 0, "reason": "no relevant geopolitical news found", "confidence": "low", "event_type": "geopolitical"}
+
+    pos, neg = _keyword_sentiment_score(relevant, as_of=as_of, max_age_days=7.0)
+    if pos == 0 and neg == 0:
+        return {"score": 0, "reason": "geopolitical headlines are mixed or low signal", "confidence": "low", "event_type": "geopolitical"}
+
+    net = pos - neg
+    magnitude = abs(net)
+    score = 3 if magnitude >= 4 else (2 if magnitude >= 2 else 1)
+    score = score if net > 0 else -score
+    direction = "bullish" if score > 0 else "bearish"
+    return {
+        "score": score,
+        "reason": f"historical geopolitical headlines skew {direction} for {symbol}",
+        "confidence": "high" if magnitude >= 4 else ("medium" if magnitude >= 2 else "low"),
+        "event_type": "geopolitical",
+    }
+
+
+def _historical_macro_signal(
+    symbol: str,
+    news: list[dict],
+    as_of: datetime | str | None = None,
+) -> dict:
+    sector = next((name for name, tickers in SECTOR_MAP["macro"].items() if symbol in tickers), None)
+    if sector is None:
+        return {"score": 0, "reason": "not a macro-sensitive stock", "confidence": "low", "event_type": "macro"}
+
+    relevant = []
+    for item in _visible_news(news, as_of=as_of, max_age_days=7.0):
+        text = _news_text(item)
+        if any(kw in text for kw in _MACRO_KW):
+            relevant.append(item)
+    if not relevant:
+        return {"score": 0, "reason": "no macro news found", "confidence": "low", "event_type": "macro"}
+
+    pos, neg = _keyword_sentiment_score(relevant, as_of=as_of, max_age_days=7.0)
+    net = pos - neg
+    if sector in {"reits", "growth_tech", "bonds"}:
+        net = -net
+    if net == 0:
+        return {"score": 0, "reason": "macro headlines are mixed or low signal", "confidence": "low", "event_type": "macro"}
+
+    magnitude = abs(net)
+    score = 3 if magnitude >= 4 else (2 if magnitude >= 2 else 1)
+    score = score if net > 0 else -score
+    direction = "bullish" if score > 0 else "bearish"
+    return {
+        "score": score,
+        "reason": f"historical macro headlines skew {direction} for {symbol} ({sector})",
+        "confidence": "high" if magnitude >= 4 else ("medium" if magnitude >= 2 else "low"),
+        "event_type": "macro",
+    }
+
+
 def get_historical_event_score(
     symbol: str,
     news: list[dict],
@@ -576,6 +723,7 @@ def get_historical_event_score(
     run_earnings: bool = True,
     run_geo: bool = False,
     run_macro: bool = False,
+    market_news: list[dict] | None = None,
 ) -> dict:
     """
     Deterministic historical event replay for backtests.
@@ -585,15 +733,11 @@ def get_historical_event_score(
     """
     signals = []
     if run_geo:
-        signals.append(
-            {"score": 0, "reason": "historical geopolitical replay unavailable", "confidence": "low", "event_type": "geopolitical"}
-        )
+        signals.append(_historical_geopolitical_signal(symbol, news, as_of=as_of))
     if run_earnings:
         signals.append(_historical_earnings_signal(symbol, news, as_of=as_of))
     if run_macro:
-        signals.append(
-            {"score": 0, "reason": "historical macro replay unavailable", "confidence": "low", "event_type": "macro"}
-        )
+        signals.append(_historical_macro_signal(symbol, market_news or news, as_of=as_of))
 
     active = [signal for signal in signals if signal["score"] != 0]
     total_score = max(-3, min(3, sum(signal["score"] for signal in active)))
