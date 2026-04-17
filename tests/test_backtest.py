@@ -9,12 +9,37 @@ import config
 
 
 def test_check_bar_exit_prefers_stop_when_both_hit():
+    # peak_price == entry_price (no run-up), both stop and TP touched intrabar
     bar = pd.Series({"l": 94.0, "h": 107.0})
-    hit = backtest._check_bar_exit(100.0, bar, stop_loss_pct=0.05, take_profit_pct=0.05)
+    hit = backtest._check_bar_exit(100.0, 100.0, bar, stop_loss_pct=0.05, take_profit_pct=0.05)
     assert hit is not None
     px, reason = hit
     assert round(px, 2) == 95.00
-    assert reason == "stop_loss"
+    assert reason == "trailing_stop"   # stop takes priority; stop trails from peak
+
+
+def test_check_bar_exit_only_take_profit():
+    bar = pd.Series({"l": 99.0, "h": 106.0})
+    hit = backtest._check_bar_exit(100.0, 100.0, bar, stop_loss_pct=0.05, take_profit_pct=0.05)
+    assert hit is not None
+    _, reason = hit
+    assert reason == "take_profit"
+
+
+def test_check_bar_exit_none_when_no_trigger():
+    bar = pd.Series({"l": 99.0, "h": 101.0})
+    assert backtest._check_bar_exit(100.0, 100.0, bar, stop_loss_pct=0.05, take_profit_pct=0.05) is None
+
+
+def test_check_bar_exit_trailing_stop_from_peak():
+    # Peak moved up to 110 — stop trails from 110, not 100
+    bar = pd.Series({"l": 103.0, "h": 105.0})
+    hit = backtest._check_bar_exit(100.0, 110.0, bar, stop_loss_pct=0.05, take_profit_pct=0.20)
+    # stop_px = 110 * 0.95 = 104.5, bar low = 103 → stop hit
+    assert hit is not None
+    px, reason = hit
+    assert round(px, 2) == 104.50
+    assert reason == "trailing_stop"
 
 
 def test_simulate_applies_take_profit(monkeypatch):
@@ -33,7 +58,7 @@ def test_simulate_applies_take_profit(monkeypatch):
         rows.append({"t": start + timedelta(days=i), "o": close, "h": high, "l": low, "c": close, "v": 1_000_000})
     df = pd.DataFrame(rows)
 
-    def _always_buy(_bars: list[dict]) -> dict:
+    def _always_buy(_bars: list[dict], market_trend: int = 0, earnings_soon: bool = False) -> dict:
         return {
             "signal": "buy",
             "score": 10,
