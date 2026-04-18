@@ -7,5 +7,110 @@
     "exit_price": 9.24,
     "pnl": -15.08,
     "exit_reason": "stop_loss"
+  },
+  {
+    "type": "decision",
+    "time": "2026-04-17T18:47:38.856204+00:00",
+    "symbol": "BBGI",
+    "action": "buy",
+    "approved": false,
+    "reason": "Rejected due to Nasdaq noncompliance notice, which is a significant negative catalyst.",
+    "size_multiplier": 1.0,
+    "score": 7,
+    "sentiment": 1,
+    "macro_day": false
+  },
+  {
+    "type": "decision",
+    "time": "2026-04-17T18:53:04.111321+00:00",
+    "symbol": "BBGI",
+    "action": "buy",
+    "approved": false,
+    "reason": "Rejected due to Nasdaq noncompliance notice, a significant negative catalyst.",
+    "size_multiplier": 1.0,
+    "score": 7,
+    "sentiment": 1,
+    "macro_day": false
+  },
+  {
+    "type": "decision",
+    "time": "2026-04-17T18:58:23.944682+00:00",
+    "symbol": "BBGI",
+    "action": "buy",
+    "approved": false,
+    "reason": "Rejected due to Nasdaq noncompliance notice, which is a significant negative catalyst.",
+    "size_multiplier": 1.0,
+    "score": 7,
+    "sentiment": 1,
+    "macro_day": false
+  },
+  {
+    "type": "decision",
+    "time": "2026-04-17T19:03:52.544621+00:00",
+    "symbol": "BBGI",
+    "action": "buy",
+    "approved": false,
+    "reason": "Rejected due to Nasdaq noncompliance notice, indicating a significant regulatory risk.",
+    "size_multiplier": 1.0,
+    "score": 8,
+    "sentiment": 1,
+    "macro_day": false
+  },
+  {
+    "type": "decision",
+    "time": "2026-04-17T19:09:29.890778+00:00",
+    "symbol": "BBGI",
+    "action": "buy",
+    "approved": false,
+    "reason": "Rejected due to Nasdaq noncompliance notice, which is a significant negative catalyst.",
+    "size_multiplier": 1.0,
+    "score": 12,
+    "sentiment": 1,
+    "macro_day": false
+  },
+  {
+    "type": "decision",
+    "time": "2026-04-17T19:14:57.434716+00:00",
+    "symbol": "BBGI",
+    "action": "buy",
+    "approved": false,
+    "reason": "Rejected due to Nasdaq noncompliance notice, which is a significant negative catalyst.",
+    "size_multiplier": 1.0,
+    "score": 12,
+    "sentiment": 1,
+    "macro_day": false
+  },
+  {
+    "type": "decision",
+    "time": "2026-04-17T19:20:31.190117+00:00",
+    "symbol": "BBGI",
+    "action": "buy",
+    "approved": false,
+    "reason": "Rejected due to Nasdaq noncompliance notice, which is a significant negative catalyst.",
+    "size_multiplier": 1.0,
+    "score": 8,
+    "sentiment": 1,
+    "macro_day": false
+  },
+  {
+    "type": "decision",
+    "time": "2026-04-17T19:26:07.411330+00:00",
+    "symbol": "BBGI",
+    "action": "buy",
+    "approved": false,
+    "reason": "Rejected due to Nasdaq noncompliance notice, which is a significant negative catalyst.",
+    "size_multiplier": 1.0,
+    "score": 7,
+    "sentiment": 1,
+    "macro_day": false
+  },
+  {
+    "type": "outcome",
+    "time": "2026-04-17T19:46:10.846024+00:00",
+    "symbol": "FRMM",
+    "entry_price": 4.58,
+    "exit_price": 5.22,
+    "pnl": 39.68,
+    "exit_reason": "take_profit"
   }
 ]

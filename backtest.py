@@ -751,52 +751,63 @@ def _precompute_bar_signals(
     if "macro_day" not in fc:
         fc["macro_day"] = _build_macro_day_map(market_event_context or {}, sorted(set(date_strings)))
 
-    _INDICATOR_LOOKBACK = 250  # EMA200 needs 200 bars + buffer; cap for O(n) not O(n²)
+    # Vectorised indicator pass: compute all series once on the full df (O(n) total).
+    # signal_at_index() then reads values at a given index in O(1).
+    # Supertrend is causal (direction[i] only depends on bars 0..i), so there is no
+    # look-ahead bias from using the full-df precomputed series.
+    _pre = strategy.precompute_series(df, timeframe=timeframe)
+
+    # Per-day event score cache — news barely changes within a day for intraday TFs.
+    # Reduces events.get_historical_event_score calls from n_bars → n_days (78× for 5Min).
+    _day_event_cache: dict[str, dict] = {}
+
     for i in range(warmup, len(df)):
-        window = df.iloc[max(0, i - _INDICATOR_LOOKBACK):i]
         bar = df.iloc[i]
         bar_ts = pd.Timestamp(bar["t"])
         bar_date = bar_ts.strftime("%Y-%m-%d")
-
         mt = market_trend_by_date.get(bar_date, 0) if market_trend_by_date else 0
-        sym_news = _historical_news_before(event_context, bar_ts, time_key="news_times", news_key="news")
-        earn_news = _historical_news_before(event_context, bar_ts, time_key="earnings_news_times", news_key="earnings_news")
-        if not sym_news:
-            sym_news = list(earn_news)
-        mkt_news = _historical_news_before(market_event_context, bar_ts, time_key="news_times", news_key="news")
-        earnings_soon = events.is_earnings_period_from_news(earn_news, as_of=bar["t"]) if earn_news else False
 
-        sig_kwargs: dict = {
-            "market_trend": mt, "earnings_soon": earnings_soon,
-            "threshold": 1, "timeframe": timeframe,
-        }
-        if disabled_components:
-            sig_kwargs["disabled_components"] = disabled_components
+        if bar_date not in _day_event_cache:
+            sym_news = _historical_news_before(event_context, bar_ts, time_key="news_times", news_key="news")
+            earn_news = _historical_news_before(event_context, bar_ts, time_key="earnings_news_times", news_key="earnings_news")
+            if not sym_news:
+                sym_news = list(earn_news)
+            mkt_news = _historical_news_before(market_event_context, bar_ts, time_key="news_times", news_key="news")
+            es_flag = events.is_earnings_period_from_news(earn_news, as_of=bar["t"]) if earn_news else False
+            ev = events.get_historical_event_score(
+                symbol, sym_news, as_of=bar["t"],
+                run_earnings=bool(earn_news), run_geo=True, run_macro=True, market_news=mkt_news,
+            )
+            sent = events.sentiment_trend_from_news(sym_news, as_of=bar["t"], max_age_days=7.0)
+            _day_event_cache[bar_date] = {"ev": ev, "earnings_soon": es_flag, "sentiment_trend": sent}
 
-        sig = strategy.compute_signals(window.to_dict("records"), **sig_kwargs)
+        day_ctx = _day_event_cache[bar_date]
+        earnings_soon = day_ctx["earnings_soon"]
+        ev = day_ctx["ev"]
 
-        ev = events.get_historical_event_score(
-            symbol, sym_news, as_of=bar["t"],
-            run_earnings=bool(earn_news), run_geo=True, run_macro=True, market_news=mkt_news,
+        sig = strategy.signal_at_index(
+            i, _pre,
+            market_trend=mt,
+            earnings_soon=earnings_soon,
+            threshold=1,
+            disabled_components=disabled_components or None,
         )
+
         if ev["event_score"] != 0:
             sig = strategy.apply_event_score(sig, ev, threshold=1)
 
         total_score = int(sig.get("score") or 0)
-
-        # gate_blocked: score says directional but gates (EMA200/SPY/earnings) killed it
         gate_blocked = (abs(total_score) >= 1 and sig.get("signal") == "hold")
-
-        # filter_blocked: context filters (peer/higher-TF/blacklist/gap) kill the signal
         t1_base = sig.get("signal") or _signal_for_threshold(total_score, 1)
-        t1_filtered = _apply_historical_signal_filters(t1_base, window, bar, timeframe, filter_context=fc)
+        prev_bar = df.iloc[i - 1: i]
+        t1_filtered = _apply_historical_signal_filters(t1_base, prev_bar, bar, timeframe, filter_context=fc)
         filter_blocked = t1_base != "hold" and t1_filtered == "hold"
 
         results[i] = {
             "score": total_score,
             "gate_blocked": gate_blocked,
             "filter_blocked": filter_blocked,
-            "sentiment_trend": events.sentiment_trend_from_news(sym_news, as_of=bar["t"], max_age_days=7.0),
+            "sentiment_trend": day_ctx["sentiment_trend"],
             "macro_event_day": bool(fc.get("macro_day", {}).get(bar_date)),
             "curated_blacklist": bool(fc.get("daily_blacklist", {}).get(bar_date)),
             "peer_consensus": True,
@@ -807,7 +818,7 @@ def _precompute_bar_signals(
             "ema200_ready": sig.get("ema200_ready", False),
             "earnings_soon": earnings_soon,
             "market_trend": mt,
-            "signal": t1_filtered,  # signal at threshold=1 after all filters (for reference)
+            "signal": t1_filtered,
         }
 
     return results
@@ -904,6 +915,7 @@ def _simulate(
     entry_fee_remaining = 0.0
     active_stop_pct = 0.0   # set at entry from ATR
     active_tp_pct = 0.0     # set at entry from ATR
+    breakeven_locked = False  # True once price moves +1×ATR in favour; floors stop at entry
     stop_cooldown = 0
     exit_hold_count = 0
     _STOP_COOLDOWN_BARS = 3
@@ -921,7 +933,16 @@ def _simulate(
             return []
         return [_position_snapshot(symbol, position_side, position_qty, mark_price, entry_px)]
 
-    def _historical_signal(window: pd.DataFrame, bar_row: pd.Series, threshold_value: int) -> dict:
+    # Lazy precompute — only materialises on cache miss (signal_cache covers all bars normally)
+    _pre: dict | None = None
+
+    def _get_pre() -> dict:
+        nonlocal _pre
+        if _pre is None:
+            _pre = strategy.precompute_series(df, timeframe=timeframe)
+        return _pre
+
+    def _historical_signal(idx: int, bar_row: pd.Series, threshold_value: int) -> dict:
         bar_ts = pd.Timestamp(bar_row["t"])
         bar_date = bar_ts.strftime("%Y-%m-%d")
         mt = market_trend_by_date.get(bar_date, 0) if market_trend_by_date else 0
@@ -931,26 +952,17 @@ def _simulate(
             symbol_news = list(earnings_news)
         market_news = _historical_news_before(market_event_context, bar_ts, time_key="news_times", news_key="news")
         earnings_soon = events.is_earnings_period_from_news(earnings_news, as_of=bar_row["t"]) if earnings_news else False
-        signal_kwargs = {
-            "market_trend": mt,
-            "earnings_soon": earnings_soon,
-            "threshold": threshold_value,
-            "timeframe": timeframe,
-        }
-        if disabled_components:
-            signal_kwargs["disabled_components"] = disabled_components
-        sig = strategy.compute_signals(
-            window.to_dict("records"),
-            **signal_kwargs,
+        # O(1) signal lookup — indicators already precomputed
+        sig = strategy.signal_at_index(
+            idx, _get_pre(),
+            market_trend=mt,
+            earnings_soon=earnings_soon,
+            threshold=threshold_value,
+            disabled_components=disabled_components or None,
         )
         event_result = events.get_historical_event_score(
-            symbol,
-            symbol_news,
-            as_of=bar_row["t"],
-            run_earnings=bool(earnings_news),
-            run_geo=True,
-            run_macro=True,
-            market_news=market_news,
+            symbol, symbol_news, as_of=bar_row["t"],
+            run_earnings=bool(earnings_news), run_geo=True, run_macro=True, market_news=market_news,
         )
         if event_result["event_score"] != 0:
             sig = strategy.apply_event_score(sig, event_result, threshold=threshold_value)
@@ -958,18 +970,14 @@ def _simulate(
         sig["macro_event_day"] = bool(filter_context.get("macro_day", {}).get(bar_date))
         sig["peer_consensus"] = True
         sig["curated_blacklist"] = bool(filter_context.get("daily_blacklist", {}).get(bar_date))
+        prev_bar = df.iloc[max(0, idx - 1): idx]  # tail(1) for gap check only
         sig["signal"] = _apply_historical_signal_filters(
             sig.get("signal") or _signal_for_threshold(int(sig.get("score") or 0), threshold_value),
-            window,
-            bar_row,
-            timeframe,
-            filter_context=filter_context,
+            prev_bar, bar_row, timeframe, filter_context=filter_context,
         )
         return sig
 
-    _INDICATOR_LOOKBACK = 250  # EMA200 needs 200 bars + buffer; cap for O(n) not O(n²)
     for i in range(warmup, len(df)):
-        window = df.iloc[max(0, i - _INDICATOR_LOOKBACK):i]
         bar = df.iloc[i]
         price = float(bar["c"])
         ts_value = pd.Timestamp(bar["t"])
@@ -977,7 +985,7 @@ def _simulate(
         bar_date = ts[:10]
         macro_day = bool(filter_context.get("macro_day", {}).get(bar_date))
         threshold_value = int(threshold) + (1 if macro_day else 0)
-        close_history[symbol.upper()] = window["c"].astype(float).tolist()
+        close_history[symbol.upper()].append(price)  # O(1) incremental — was O(n²) slice
         exited_this_bar = False
 
         account_before = _account_snapshot(cash, _mark_equity(price))
@@ -988,6 +996,20 @@ def _simulate(
             stop_cooldown -= 1
 
         if position_side and position_qty > 0:
+            # Breakeven lock-in: once price moves +1×SL_distance in favour, floor stop at entry.
+            # Using SL distance (not ATR) ensures breakeven triggers at same scale as the stop.
+            _be_trigger = active_stop_pct * entry_px  # 1R move needed to lock breakeven
+            if _be_trigger > 0 and not breakeven_locked:
+                if (position_side == "long" and price >= entry_px + _be_trigger) or \
+                   (position_side == "short" and price <= entry_px - _be_trigger):
+                    breakeven_locked = True
+            if breakeven_locked:
+                if position_side == "long" and trail_anchor_px > entry_px:
+                    # Tighten sl so stop_px = trail_anchor × (1 - sl) >= entry_px
+                    active_stop_pct = min(active_stop_pct, max(0.0, 1.0 - entry_px / trail_anchor_px))
+                elif position_side == "short" and 0 < trail_anchor_px < entry_px:
+                    active_stop_pct = min(active_stop_pct, max(0.0, entry_px / trail_anchor_px - 1.0))
+
             exit_on_bar = _check_bar_exit(
                 entry_px,
                 trail_anchor_px,
@@ -1003,7 +1025,7 @@ def _simulate(
                     and config.USE_AGENT
                     and exit_hold_count < config.MAX_EXIT_HOLDS
                 ):
-                    review_sig = _historical_signal(window, bar, threshold_value)
+                    review_sig = _historical_signal(i, bar, threshold_value)
                     score = int(review_sig.get("score") or 0)
                     hold_review = (
                         (position_side == "long" and score >= threshold_value + 1)
@@ -1057,9 +1079,59 @@ def _simulate(
                     entry_fee_remaining = 0.0
                     active_stop_pct = 0.0
                     active_tp_pct = 0.0
+                    breakeven_locked = False
                     exit_hold_count = 0
                     if "stop" in reason:
                         stop_cooldown = _STOP_COOLDOWN_BARS
+                    exited_this_bar = True
+
+        # Hard EOD force-exit for intraday TFs:
+        # Close ALL positions when the NEXT bar crosses into the 16:00+ ET hour range.
+        # Fires exactly once (on the last regular-session bar), avoids overnight gap risk.
+        # No conditional skip — AH extended-hours lingering risks reversals (observed empirically).
+        if (not exited_this_bar and position_side and position_qty > 0
+                and timeframe not in ("1Day",) and i + 1 < len(df)):
+            _next_raw = pd.Timestamp(df.iloc[i + 1]["t"])
+            try:
+                _tz = "America/New_York"
+                _ne = (_next_raw.tz_localize("UTC") if _next_raw.tzinfo is None else _next_raw).tz_convert(_tz)
+                _ce = (ts_value.tz_localize("UTC") if ts_value.tzinfo is None else ts_value).tz_convert(_tz)
+                # Only fire at the FIRST 16:00+ bar (current bar still in regular session ≤ 15:59)
+                _is_eod = (_ce.hour < 16) and (_ne.hour >= 16 or _ne.date() != _ce.date())
+            except Exception:
+                _is_eod = _next_raw.strftime("%Y-%m-%d") != bar_date
+            if _is_eod:
+                if True:  # always exit — hard close
+                    position_before_exit = position_qty
+                    _exit_side = "sell" if position_side == "long" else "buy"
+                    _fill_eod = _apply_slippage(price, _exit_side, slippage_bps, bar=bar, qty=position_qty)
+                    if position_side == "long":
+                        cash += position_qty * _fill_eod - fee_per_trade
+                    else:
+                        cash -= position_qty * _fill_eod + fee_per_trade
+                    _trade_fees, entry_fee_remaining = _allocate_trade_fees(
+                        entry_fee_remaining=entry_fee_remaining,
+                        exit_fee=fee_per_trade,
+                        qty_exiting=position_qty,
+                        position_qty_before_exit=position_before_exit,
+                    )
+                    trades.append(_make_trade(
+                        symbol=symbol, entry_px=entry_px, exit_px=_fill_eod, qty=position_qty,
+                        entry_date=entry_date, exit_date=ts, exit_reason="eod_force_exit",
+                        fees=_trade_fees, side=position_side,
+                    ))
+                    position_qty = 0.0
+                    position_side = None
+                    entry_px = 0.0
+                    trail_anchor_px = 0.0
+                    entry_atr = 0.0
+                    partial_done = False
+                    entry_date = ""
+                    entry_fee_remaining = 0.0
+                    active_stop_pct = 0.0
+                    active_tp_pct = 0.0
+                    breakeven_locked = False
+                    exit_hold_count = 0
                     exited_this_bar = True
 
         if exited_this_bar:
@@ -1075,11 +1147,12 @@ def _simulate(
                 _derived_signal = _signal_for_threshold(cached_score, threshold_value)
             sig = {**cached, "signal": _derived_signal, "score": cached_score}
         else:
-            sig = _historical_signal(window, bar, threshold_value)
+            sig = _historical_signal(i, bar, threshold_value)
         signal = str(sig.get("signal") or "hold")
 
-        if position_side == "long" and position_qty >= 2 and not partial_done and entry_atr > 0:
-            partial_target = entry_px + 1.5 * entry_atr
+        if position_side == "long" and position_qty >= 2 and not partial_done and active_stop_pct > 0:
+            # Partial profit at 2R (2×SL distance from entry) — proper reward/risk target.
+            partial_target = entry_px * (1 + 2.0 * active_stop_pct)
             if price >= partial_target:
                 position_before_exit = position_qty
                 partial_qty = float(max(1.0, round(position_qty * 0.5, 0)))
@@ -1143,6 +1216,7 @@ def _simulate(
                 entry_fee_remaining = 0.0
                 active_stop_pct = 0.0
                 active_tp_pct = 0.0
+                breakeven_locked = False
                 exit_hold_count = 0
 
         elif position_side == "short" and signal == "buy":
@@ -1180,6 +1254,7 @@ def _simulate(
                 entry_fee_remaining = 0.0
                 active_stop_pct = 0.0
                 active_tp_pct = 0.0
+                breakeven_locked = False
                 exit_hold_count = 0
 
         if position_side is None and stop_cooldown == 0 and signal in ("buy", "sell"):
@@ -1231,8 +1306,11 @@ def _simulate(
                             _atr_val = entry_atr if entry_atr > 0 else fill_entry_px * 0.01
                             _computed_sl = (_atr_val * sl_atr_mult) / max(fill_entry_px, 1e-9)
                             _computed_tp = (_atr_val * tp_atr_mult) / max(fill_entry_px, 1e-9)
-                            active_stop_pct = float(agent_result["suggested_stop_pct"] or _computed_sl)
+                            # Use ATR-based SL in backtest — agent override bypasses optimizer grid.
+                            # Ensure minimum of 0.3% to avoid noise-stop on illiquid bars.
+                            active_stop_pct = max(0.003, _computed_sl)
                             active_tp_pct = _computed_tp
+                            breakeven_locked = False
                             last_order_at[symbol.upper()] = ts_value
                             exit_hold_count = 0
 
@@ -1332,10 +1410,11 @@ def _build_spy_trend(timeframe: str, days: int) -> dict[str, int]:
 
 def _parameter_grid() -> list[tuple[int, float, float]]:
     thresholds = [2, 3, 4, 5]
-    sl_mults = [1.0, 1.5, 2.0, 2.5, 3.0]   # × ATR
-    tp_mults = [1.5, 2.0, 3.0, 4.0, 5.0]   # × ATR — always > sl_mult enforced below
-    # Only combos where TP > SL (positive R:R guaranteed)
-    return [(t, sl, tp) for t, sl, tp in itertools.product(thresholds, sl_mults, tp_mults) if tp > sl]
+    # ATR multipliers now matter: agent stop override removed, optimizer sweeps real SL values.
+    # Range 1–8×ATR covers tight noise-stop (1×) through wide trend-riding (8×).
+    sl_mults = [1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0]
+    # TP disabled (0.0) — 2R partial profit + trailing stop handle profit taking
+    return [(t, sl, 0.0) for t, sl in itertools.product(thresholds, sl_mults)]
 
 
 def _candidate_sort_key(result: dict) -> tuple[float, float, float, int]:
@@ -1822,7 +1901,7 @@ def optimize(
             {
                 "threshold": threshold,
                 "sl_mult": f"{sl:.1f}×ATR",
-                "tp_mult": f"{tp:.1f}×ATR",
+                "tp_mult": "trailing" if tp == 0.0 else f"{tp:.1f}×ATR",
                 "train_trades": train_result["trades"],
                 "train_return": train_result["total_return_pct"],
                 "train_sharpe": train_result["sharpe"],
@@ -1969,8 +2048,9 @@ def run_portfolio(
             "partial_done": False,
             "entry_date": "",
             "entry_fee_remaining": 0.0,
-            "active_stop_pct": 0.0,  # set at entry from ATR
-            "active_tp_pct": 0.0,    # set at entry from ATR
+            "active_stop_pct": 0.0,    # set at entry from ATR
+            "active_tp_pct": 0.0,      # set at entry from ATR
+            "breakeven_locked": False,  # floored at entry price once +1×ATR gained
             "stop_cooldown": 0,
             "exit_hold_count": 0,
         }
@@ -2070,6 +2150,18 @@ def run_portfolio(
 
         exited_this_bar = False
         if state["side"] and state["qty"] > 0:
+            # Breakeven lock-in: once +1×SL_distance gained, floor stop at entry price
+            _be_trigger_s = state["active_stop_pct"] * state["entry_px"]
+            if _be_trigger_s > 0 and not state["breakeven_locked"]:
+                if (state["side"] == "long" and price >= state["entry_px"] + _be_trigger_s) or \
+                   (state["side"] == "short" and price <= state["entry_px"] - _be_trigger_s):
+                    state["breakeven_locked"] = True
+            if state["breakeven_locked"]:
+                if state["side"] == "long" and state["trail_anchor_px"] > state["entry_px"]:
+                    state["active_stop_pct"] = min(state["active_stop_pct"], max(0.0, 1.0 - state["entry_px"] / state["trail_anchor_px"]))
+                elif state["side"] == "short" and 0 < state["trail_anchor_px"] < state["entry_px"]:
+                    state["active_stop_pct"] = min(state["active_stop_pct"], max(0.0, state["entry_px"] / state["trail_anchor_px"] - 1.0))
+
             exit_on_bar = _check_bar_exit(
                 state["entry_px"],
                 state["trail_anchor_px"],
@@ -2140,6 +2232,7 @@ def run_portfolio(
                             "entry_fee_remaining": 0.0,
                             "active_stop_pct": 0.0,
                             "active_tp_pct": 0.0,
+                            "breakeven_locked": False,
                             "exit_hold_count": 0,
                         }
                     )
@@ -2154,8 +2247,8 @@ def run_portfolio(
         sig = _historical_signal(symbol, window, bar, threshold_value)
         signal = str(sig.get("signal") or "hold")
 
-        if state["side"] == "long" and state["qty"] >= 2 and not state["partial_done"] and state["entry_atr"] > 0:
-            partial_target = state["entry_px"] + 1.5 * state["entry_atr"]
+        if state["side"] == "long" and state["qty"] >= 2 and not state["partial_done"] and state["active_stop_pct"] > 0:
+            partial_target = state["entry_px"] * (1 + 2.0 * state["active_stop_pct"])
             if price >= partial_target:
                 partial_qty = float(max(1.0, round(state["qty"] * 0.5, 0)))
                 if partial_qty < state["qty"]:
@@ -2219,6 +2312,7 @@ def run_portfolio(
                         "entry_fee_remaining": 0.0,
                         "active_stop_pct": 0.0,
                         "active_tp_pct": 0.0,
+                        "breakeven_locked": False,
                         "exit_hold_count": 0,
                     }
                 )
@@ -2259,6 +2353,7 @@ def run_portfolio(
                         "entry_fee_remaining": 0.0,
                         "active_stop_pct": 0.0,
                         "active_tp_pct": 0.0,
+                        "breakeven_locked": False,
                         "exit_hold_count": 0,
                     }
                 )
@@ -2314,8 +2409,9 @@ def run_portfolio(
                                     "partial_done": False,
                                     "entry_date": ts,
                                     "entry_fee_remaining": float(config.BACKTEST_FEE_PER_TRADE),
-                                    "active_stop_pct": float(agent_result["suggested_stop_pct"] or _computed_sl),
+                                    "active_stop_pct": max(0.003, _computed_sl),
                                     "active_tp_pct": _computed_tp,
+                                    "breakeven_locked": False,
                                     "exit_hold_count": 0,
                                 }
                             )

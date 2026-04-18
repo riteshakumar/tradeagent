@@ -148,44 +148,38 @@ def _supertrend(df: pd.DataFrame, multiplier: float = 3.0, period: int = 10) -> 
     Supertrend indicator: ATR-based adaptive trend line.
     Returns (supertrend_line, direction) where direction = +1 (bullish) or -1 (bearish).
     Cleaner than EMA stacking: flips only on confirmed breakouts above/below the band.
+
+    Implementation uses raw numpy arrays for the inner loop (pandas iloc in a loop is
+    ~50× slower than numpy array indexing on the same element access pattern).
     """
-    high = df["h"].astype(float)
-    low = df["l"].astype(float)
-    close = df["c"].astype(float)
-    hl2 = (high + low) / 2.0
+    close_arr = df["c"].astype(float).values
+    hl2 = ((df["h"].astype(float) + df["l"].astype(float)) / 2.0).values
     atr_s = _atr(df, period)
+    idx = df.index
 
-    upper_band = hl2 + multiplier * atr_s
-    lower_band = hl2 - multiplier * atr_s
+    upper_arr = hl2 + multiplier * atr_s.values
+    lower_arr = hl2 - multiplier * atr_s.values
+    direction_arr = np.ones(len(close_arr), dtype=np.int8)
+    st_arr = np.full(len(close_arr), np.nan)
 
-    supertrend = pd.Series(np.nan, index=close.index)
-    direction = pd.Series(1, index=close.index)
-
-    for i in range(1, len(close)):
-        prev_upper = upper_band.iloc[i - 1]
-        prev_lower = lower_band.iloc[i - 1]
-        prev_close = close.iloc[i - 1]
-        prev_dir = direction.iloc[i - 1]
-
+    for i in range(1, len(close_arr)):
+        prev_close = close_arr[i - 1]
         # Tighten bands: don't widen the channel when price moves in trend direction
-        cur_upper = upper_band.iloc[i]
-        cur_lower = lower_band.iloc[i]
-        if prev_close <= prev_upper:
-            upper_band.iloc[i] = min(cur_upper, prev_upper)
-        if prev_close >= prev_lower:
-            lower_band.iloc[i] = max(cur_lower, prev_lower)
-
+        if prev_close <= upper_arr[i - 1]:
+            upper_arr[i] = min(upper_arr[i], upper_arr[i - 1])
+        if prev_close >= lower_arr[i - 1]:
+            lower_arr[i] = max(lower_arr[i], lower_arr[i - 1])
         # Flip direction on confirmed breakout
-        if prev_dir == -1 and close.iloc[i] > upper_band.iloc[i - 1]:
-            direction.iloc[i] = 1
-        elif prev_dir == 1 and close.iloc[i] < lower_band.iloc[i - 1]:
-            direction.iloc[i] = -1
+        prev_dir = direction_arr[i - 1]
+        if prev_dir == -1 and close_arr[i] > upper_arr[i - 1]:
+            direction_arr[i] = 1
+        elif prev_dir == 1 and close_arr[i] < lower_arr[i - 1]:
+            direction_arr[i] = -1
         else:
-            direction.iloc[i] = prev_dir
+            direction_arr[i] = prev_dir
+        st_arr[i] = lower_arr[i] if direction_arr[i] == 1 else upper_arr[i]
 
-        supertrend.iloc[i] = lower_band.iloc[i] if direction.iloc[i] == 1 else upper_band.iloc[i]
-
-    return supertrend, direction
+    return pd.Series(st_arr, index=idx), pd.Series(direction_arr, index=idx)
 
 
 def _vwap(df: pd.DataFrame) -> pd.Series:
@@ -723,6 +717,291 @@ def compute_signals(
         # Individual component scores — exposed for agent context
         **{field: component_scores.get(component, 0) for field, component in component_field_map.items()},
         "adx_score": 1 if adx_value >= _ADX_TREND_MIN else (-1 if 0 < adx_value < _ADX_RANGE_MAX else 0),
+    }
+
+
+def _vwap_full(df: pd.DataFrame) -> pd.Series:
+    """Session-reset VWAP for every bar in df (recomputes from session start each day)."""
+    close = df["c"].astype(float)
+    volume = df["v"].astype(float)
+    vwap = pd.Series(np.nan, index=df.index, dtype=float)
+    if "t" in df.columns:
+        try:
+            dates = pd.to_datetime(df["t"]).dt.date
+            for _date, grp in df.groupby(dates):
+                idx = grp.index
+                cum_tpv = (close.loc[idx] * volume.loc[idx]).cumsum()
+                cum_vol = volume.loc[idx].cumsum().replace(0, np.nan)
+                vwap.loc[idx] = cum_tpv / cum_vol
+            return vwap
+        except Exception:
+            pass
+    cum_tpv = (close * volume).cumsum()
+    cum_vol = volume.cumsum().replace(0, np.nan)
+    return cum_tpv / cum_vol
+
+
+def precompute_series(df: pd.DataFrame, timeframe: str | None = None) -> dict:
+    """
+    Compute all indicator Series for the full df at once — O(n).
+    Use with signal_at_index() for fast per-bar signal lookup.
+    Replaces the O(n²) pattern of calling compute_signals(window[:i]) per bar.
+    """
+    close = df["c"].astype(float)
+    volume = df["v"].astype(float)
+    resolved_tf = _resolve_timeframe(timeframe, df)
+    is_intraday = _is_intraday_timeframe(resolved_tf)
+    periods_per_day = _PERIODS_PER_DAY.get(resolved_tf, 1.0)
+
+    rsi_s = _rsi(close)
+    macd_line, signal_line = _macd(close)
+    ema20_s = _ema(close, 20)
+    ema50_s = _ema(close, 50)
+    ema200_s = _ema(close, 200)
+    bb_mid, bb_upper, bb_lower = _bollinger(close)
+    atr_s = _atr(df)
+    adx_s = _adx(df)
+    st_line, st_dir = _supertrend(df)  # has internal loop but runs once
+
+    vol_avg20 = volume.rolling(20, min_periods=1).mean()
+    mom_roc = close.pct_change(5) * 100                    # 5-period ROC %
+    roll_high20 = close.shift(1).rolling(20).max()         # prior-20 high (excludes current)
+    roll_low20 = close.shift(1).rolling(20).min()          # prior-20 low
+
+    vwap_s = _vwap_full(df) if is_intraday else pd.Series(np.nan, index=df.index, dtype=float)
+
+    # For regime detection per bar
+    trend_strength_s = (ema20_s - ema50_s) / close.replace(0, np.nan)
+    realized_vol_s = close.pct_change().rolling(20, min_periods=10).std() * (periods_per_day ** 0.5)
+
+    return {
+        "timeframe": resolved_tf,
+        "is_intraday": is_intraday,
+        "close": close, "volume": volume,
+        "rsi": rsi_s,
+        "macd_line": macd_line, "signal_line": signal_line,
+        "ema20": ema20_s, "ema50": ema50_s, "ema200": ema200_s,
+        "bb_upper": bb_upper, "bb_lower": bb_lower, "bb_mid": bb_mid,
+        "atr": atr_s, "adx": adx_s,
+        "st_dir": st_dir,
+        "vol_avg20": vol_avg20,
+        "mom_roc": mom_roc,
+        "roll_high20": roll_high20, "roll_low20": roll_low20,
+        "vwap": vwap_s,
+        "trend_strength": trend_strength_s, "realized_vol": realized_vol_s,
+    }
+
+
+def signal_at_index(
+    idx: int,
+    pre: dict,
+    market_trend: int = 0,
+    earnings_soon: bool = False,
+    threshold: int | None = None,
+    disabled_components: set[str] | None = None,
+) -> dict:
+    """
+    Compute trading signal for bar at idx using precomputed series from precompute_series().
+    O(1) per bar vs O(n) for compute_signals(). Call precompute_series() once per df.
+    """
+    timeframe = pre["timeframe"]
+    is_intraday = pre["is_intraday"]
+    close = pre["close"]
+    volume = pre["volume"]
+
+    _empty = {
+        "signal": "hold", "reason": "not enough data", "score": 0,
+        "rsi": None, "price": None, "atr": None, "adx": None,
+        "event_score": 0, "event_reasons": [], "regime": "range",
+        "regime_confidence": 0.0, "market_trend": market_trend,
+        "timeframe": timeframe, "ema200_ready": False,
+        "regime_trend_strength": 0.0, "regime_realized_vol": 0.0,
+        "ema_score": 0, "macd_score": 0, "rsi_score": 0, "bb_score": 0,
+        "supertrend_score": 0, "vwap_score": 0, "breakout_score": 0,
+        "momentum_score": 0, "adx_score": 0, "earnings_soon": earnings_soon,
+    }
+    if idx < 30 or idx >= len(close):
+        return _empty
+
+    price = float(close.iloc[idx])
+
+    # --- Extract scalar values from precomputed series ---
+    def _f(s: pd.Series) -> float:
+        v = s.iloc[idx]
+        return float(v) if not (v != v) else float("nan")  # handles NaN
+
+    last_rsi = _f(pre["rsi"])
+    prev_rsi = float(pre["rsi"].iloc[idx - 1]) if idx > 0 else None
+    if prev_rsi != prev_rsi:
+        prev_rsi = None  # NaN → None
+
+    macd_slice = pre["macd_line"].iloc[idx - 1: idx + 1]
+    sig_slice  = pre["signal_line"].iloc[idx - 1: idx + 1]
+
+    e20  = _f(pre["ema20"]);  e50 = _f(pre["ema50"]);  e200 = _f(pre["ema200"])
+    e20_prev = float(pre["ema20"].iloc[idx - 1]) if idx > 0 else None
+    e50_prev = float(pre["ema50"].iloc[idx - 1]) if idx > 0 else None
+    if e20_prev != e20_prev: e20_prev = None
+    if e50_prev != e50_prev: e50_prev = None
+
+    bb_upper = _f(pre["bb_upper"]); bb_lower = _f(pre["bb_lower"])
+    bb_mid_v = _f(pre["bb_mid"])
+    bb_width_pct = ((bb_upper - bb_lower) / bb_mid_v) if bb_mid_v and bb_mid_v > 0 and bb_mid_v == bb_mid_v else None
+
+    adx_val = _f(pre["adx"])
+    adx_val = adx_val if adx_val == adx_val else 0.0
+
+    st_dir_slice = pre["st_dir"].iloc[max(0, idx - 1): idx + 1]
+
+    last_vol  = float(volume.iloc[idx])
+    avg_vol20 = _f(pre["vol_avg20"])
+    avg_vol20 = avg_vol20 if avg_vol20 == avg_vol20 else 0.0
+
+    mom_roc_v = _f(pre["mom_roc"])
+    roll_high = _f(pre["roll_high20"]); roll_low = _f(pre["roll_low20"])
+
+    vwap_v = _f(pre["vwap"])
+
+    atr_v  = _f(pre["atr"])
+    atr_v  = atr_v if atr_v == atr_v else None
+
+    # --- Regime detection from precomputed scalars ---
+    ts_v = _f(pre["trend_strength"]); rv_v = _f(pre["realized_vol"])
+    ts_v = ts_v if ts_v == ts_v else 0.0; rv_v = rv_v if rv_v == rv_v else 0.0
+    t_thresh = config.TREND_STRENGTH_THRESHOLD; v_thresh = config.HIGH_VOL_THRESHOLD
+    if ts_v >= t_thresh:
+        regime_name = "bull_trend"
+        regime_conf = min(1.0, abs(ts_v) / (t_thresh * 2.0))
+    elif ts_v <= -t_thresh:
+        regime_name = "bear_trend"
+        regime_conf = min(1.0, abs(ts_v) / (t_thresh * 2.0))
+    elif rv_v >= v_thresh:
+        regime_name = "high_volatility"
+        regime_conf = min(1.0, rv_v / (v_thresh * 2.0))
+    else:
+        regime_name, regime_conf = "range", 0.6
+
+    regime = {"regime": regime_name, "confidence": round(regime_conf, 4),
+               "trend_strength": round(ts_v, 6), "realized_vol": round(rv_v, 6)}
+
+    # --- Score components (reuse existing scoring functions with scalar/slice inputs) ---
+    component_scores: dict[str, int] = {}
+    component_reasons: dict[str, str] = {}
+    disabled = {str(n).strip().lower() for n in (disabled_components or set()) if str(n).strip()}
+
+    def _add(name: str, score: int, reason: str) -> None:
+        if name not in disabled and score:
+            component_scores[name] = score
+            component_reasons[name] = reason
+
+    rsi_sc, rsi_r = _rsi_score(last_rsi, prev_rsi)
+    macd_sc, macd_r = _macd_score(macd_slice, sig_slice) if len(macd_slice) >= 2 else (0, "")
+    ema_sc, ema_r = _ema_score(price, e20, e50, e200, e20_prev, e50_prev)
+    bb_sc, bb_r = _bb_score(price, bb_upper, bb_lower, bb_width_pct)
+    st_sc, st_r = _supertrend_score(st_dir_slice) if len(st_dir_slice) >= 2 else (0, "")
+
+    # Breakout inline (needs precomputed rolling high/low)
+    if roll_high == roll_high and roll_low == roll_low and avg_vol20 > 0:
+        vol_ok = (last_vol / avg_vol20) >= 2.0
+        if price > roll_high and vol_ok:
+            bo_sc, bo_r = 2, f"20d breakout+vol ({price:.2f}>{roll_high:.2f}, {last_vol/avg_vol20:.1f}x)"
+        elif price < roll_low and vol_ok:
+            bo_sc, bo_r = -2, f"20d breakdown+vol ({price:.2f}<{roll_low:.2f}, {last_vol/avg_vol20:.1f}x)"
+        else:
+            bo_sc, bo_r = 0, ""
+    else:
+        bo_sc, bo_r = 0, ""
+
+    # ADX mode switching
+    if not config.ENABLE_REGIME_SWITCHING:
+        _add("rsi", rsi_sc, rsi_r); _add("macd", macd_sc, macd_r)
+        _add("ema", ema_sc, ema_r); _add("bb", bb_sc, bb_r)
+        _add("supertrend", st_sc, st_r); _add("breakout", bo_sc, bo_r)
+    elif adx_val >= _ADX_TREND_MIN:
+        _add("macd", macd_sc, macd_r); _add("ema", ema_sc, ema_r)
+        _add("supertrend", st_sc, st_r); _add("breakout", bo_sc, bo_r)
+    elif 0 < adx_val < _ADX_RANGE_MAX:
+        _add("rsi", rsi_sc, rsi_r); _add("bb", bb_sc, bb_r)
+    else:
+        _add("rsi", rsi_sc, rsi_r); _add("macd", macd_sc, macd_r)
+        _add("ema", ema_sc, ema_r); _add("bb", bb_sc, bb_r)
+        _add("supertrend", st_sc, st_r); _add("breakout", bo_sc, bo_r)
+
+    # Momentum (always)
+    if mom_roc_v == mom_roc_v:
+        if mom_roc_v >= 3.0:
+            _add("momentum", 1, f"bullish momentum ROC(5)={mom_roc_v:.1f}%")
+        elif mom_roc_v <= -3.0:
+            _add("momentum", -1, f"bearish momentum ROC(5)={mom_roc_v:.1f}%")
+
+    # VWAP (intraday only)
+    if is_intraday and vwap_v == vwap_v and vwap_v > 0:
+        diff_pct = (price - vwap_v) / vwap_v * 100
+        if diff_pct > 0.5:
+            _add("vwap", 1, f"price above VWAP by {diff_pct:.1f}%")
+        elif diff_pct < -0.5:
+            _add("vwap", -1, f"price below VWAP by {abs(diff_pct):.1f}%")
+
+    # Indicator agreement check
+    if not _check_indicator_agreement(component_scores):
+        component_scores = {}; component_reasons = {}
+
+    # Volume confirm
+    base_score = float(sum(component_scores.values()))
+    if avg_vol20 > 0:
+        ratio = last_vol / avg_vol20
+        if ratio > 2.0 and base_score > 0:
+            _add("volume", 1, f"volume surge confirms move ({ratio:.1f}x avg)")
+        elif ratio > 2.0 and base_score < 0:
+            _add("volume", -1, f"volume surge confirms move ({ratio:.1f}x avg)")
+
+    # Regime weights
+    weights = _BASE_WEIGHTS
+    if config.ENABLE_REGIME_SWITCHING:
+        weights = _REGIME_WEIGHTS.get(regime_name, _BASE_WEIGHTS)
+
+    weighted_score = 0.0
+    reasons: list[str] = []
+    for name, raw in component_scores.items():
+        w = float(weights.get(name, 1.0))
+        weighted_score += raw * w
+        reasons.append(f"{component_reasons[name]} [{name} x{w:.2f}]")
+
+    if market_trend == -1:
+        weighted_score -= 1.0
+        reasons.append("[SPY bear penalty: -1]")
+
+    score = int(round(weighted_score))
+    t = _resolve_signal_threshold(timeframe, threshold)
+    signal = "buy" if score >= t else ("sell" if score <= -t else "hold")
+
+    if signal == "buy" and earnings_soon:
+        signal = "hold"
+        reasons.append("[buy suppressed: earnings period]")
+
+    ema200_ready = idx >= 200 and e200 == e200
+
+    component_field_map = {
+        "ema_score": "ema", "macd_score": "macd", "rsi_score": "rsi",
+        "bb_score": "bb", "supertrend_score": "supertrend", "vwap_score": "vwap",
+        "breakout_score": "breakout", "momentum_score": "momentum",
+    }
+
+    return {
+        "signal": signal, "score": score,
+        "rsi":   round(last_rsi, 2) if last_rsi == last_rsi else None,
+        "price": round(price, 2),
+        "atr":   round(atr_v, 4) if atr_v is not None else None,
+        "adx":   round(adx_val, 2) if adx_val else None,
+        "reason": "; ".join(reasons) if reasons else "no strong signal",
+        "event_score": 0, "event_reasons": [],
+        "regime": regime_name, "regime_confidence": regime["confidence"],
+        "regime_trend_strength": regime["trend_strength"],
+        "regime_realized_vol": regime["realized_vol"],
+        "timeframe": timeframe, "market_trend": market_trend,
+        "earnings_soon": earnings_soon, "ema200_ready": ema200_ready,
+        **{field: component_scores.get(comp, 0) for field, comp in component_field_map.items()},
+        "adx_score": 1 if adx_val >= _ADX_TREND_MIN else (-1 if 0 < adx_val < _ADX_RANGE_MAX else 0),
     }
 
 
