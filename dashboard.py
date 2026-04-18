@@ -43,6 +43,21 @@ st.markdown("""
     --success: #34d399;
     --danger: #fb7185;
     --warning: #f59e0b;
+    --control-bg: rgba(10, 23, 44, 0.94);
+    --control-bg-hover: rgba(13, 30, 56, 0.97);
+    --control-border: #355171;
+    --control-border-strong: #4f749f;
+    --control-focus: rgba(103, 232, 249, 0.24);
+    --control-radius: 12px;
+    --control-height: 42px;
+    --glass-pane: rgba(10, 23, 44, 0.58);
+    --glass-pane-soft: rgba(11, 25, 48, 0.46);
+    --glass-pane-strong: rgba(9, 20, 39, 0.74);
+    --glass-border: rgba(129, 161, 202, 0.3);
+    --glass-border-bright: rgba(125, 211, 252, 0.45);
+    --glass-highlight: rgba(186, 230, 253, 0.16);
+    --glass-shadow: 0 16px 34px rgba(2, 8, 20, 0.34);
+    --glass-blur: 12px;
     --shadow-lg: 0 20px 48px rgba(2, 8, 20, 0.48);
     --space-1: 0.35rem;
     --space-2: 0.55rem;
@@ -72,9 +87,222 @@ footer { visibility: hidden; }
 #MainMenu { visibility: hidden; }
 [data-testid="stDecoration"] { display: none !important; }
 [data-testid="stAppDeployButton"] { display: none !important; }
-[data-testid="stSidebar"] { display: none !important; }
-[data-testid="collapsedControl"] { display: none !important; }
-[data-testid="stSidebarCollapsedControl"] { display: none !important; }
+[data-testid="stSidebar"] {
+    display: block !important;
+    background: linear-gradient(165deg, rgba(8, 18, 35, 0.76), rgba(11, 25, 48, 0.68)) !important;
+    border-right: 1px solid var(--glass-border) !important;
+    backdrop-filter: blur(calc(var(--glass-blur) + 2px)) saturate(130%) !important;
+    overflow-x: hidden !important;
+    box-sizing: border-box !important;
+    box-shadow: 18px 0 40px rgba(2, 8, 20, 0.24), inset -1px 0 0 rgba(186, 230, 253, 0.05) !important;
+}
+[data-testid="stSidebar"][aria-expanded="true"] > div:first-child {
+    width: 340px !important;
+    min-width: 340px !important;
+    max-width: 340px !important;
+    overflow-x: hidden !important;
+    box-sizing: border-box !important;
+}
+[data-testid="stSidebarCollapseButton"],
+[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"] {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+[data-testid="stSidebarCollapseButton"] {
+    margin: 0.28rem 0.35rem 0.1rem 0.35rem !important;
+}
+[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"] {
+    position: fixed !important;
+    top: 0.64rem !important;
+    left: 0.62rem !important;
+    z-index: 1150 !important;
+    margin: 0 !important;
+    gap: 0.45rem !important;
+    pointer-events: auto !important;
+    overflow: visible !important;
+}
+[data-testid="stExpandSidebarButton"] {
+    position: fixed !important;
+    top: 0.64rem !important;
+    left: 0.62rem !important;
+    z-index: 1160 !important;
+    width: 46px !important;
+    height: 46px !important;
+    min-width: 46px !important;
+    min-height: 46px !important;
+    padding: 0 !important;
+    border-radius: 999px !important;
+    border: 1px solid #67e8f9 !important;
+    background: linear-gradient(145deg, #0b6da4 0%, #0ea5c8 55%, #14b8a6 100%) !important;
+    color: #ecfeff !important;
+    box-shadow:
+        0 14px 30px rgba(6, 182, 212, 0.45),
+        0 0 0 1px rgba(125, 211, 252, 0.32) inset !important;
+    transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.18s ease !important;
+    overflow: visible !important;
+}
+[data-testid="stExpandSidebarButton"]:hover {
+    transform: translateY(-1px) scale(1.02) !important;
+    border-color: #a5f3fc !important;
+    box-shadow:
+        0 18px 34px rgba(6, 182, 212, 0.48),
+        0 0 0 1px rgba(165, 243, 252, 0.45) inset !important;
+}
+[data-testid="stExpandSidebarButton"]:focus-visible {
+    outline: 2px solid rgba(103, 232, 249, 0.5) !important;
+    outline-offset: 2px !important;
+}
+[data-testid="stSidebarCollapseButton"] button,
+[data-testid="collapsedControl"] button,
+[data-testid="stSidebarCollapsedControl"] button,
+button[kind="header"],
+button[aria-label*="sidebar" i],
+button[title*="sidebar" i] {
+    width: 34px !important;
+    height: 34px !important;
+    border-radius: 999px !important;
+    border: 1px solid #355577 !important;
+    background: linear-gradient(150deg, rgba(9, 23, 44, 0.98), rgba(13, 32, 60, 0.98)) !important;
+    color: #cde9ff !important;
+    box-shadow: 0 8px 20px rgba(2, 8, 20, 0.45), inset 0 1px 0 rgba(186, 230, 253, 0.14) !important;
+    transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.18s ease !important;
+}
+[data-testid="collapsedControl"] button,
+[data-testid="stSidebarCollapsedControl"] button {
+    width: 46px !important;
+    height: 46px !important;
+    border: 1px solid #67e8f9 !important;
+    background: linear-gradient(145deg, #0b6da4 0%, #0ea5c8 55%, #14b8a6 100%) !important;
+    color: #ecfeff !important;
+    box-shadow:
+        0 14px 30px rgba(6, 182, 212, 0.45),
+        0 0 0 1px rgba(125, 211, 252, 0.32) inset !important;
+}
+[data-testid="stSidebarCollapseButton"] button:hover,
+[data-testid="collapsedControl"] button:hover,
+[data-testid="stSidebarCollapsedControl"] button:hover,
+button[kind="header"]:hover,
+button[aria-label*="sidebar" i]:hover,
+button[title*="sidebar" i]:hover {
+    transform: translateY(-1px) !important;
+    border-color: #67e8f9 !important;
+    box-shadow: 0 12px 24px rgba(14, 116, 144, 0.36), inset 0 1px 0 rgba(186, 230, 253, 0.24) !important;
+}
+[data-testid="collapsedControl"] button:hover,
+[data-testid="stSidebarCollapsedControl"] button:hover {
+    transform: translateY(-1px) scale(1.02) !important;
+    border-color: #a5f3fc !important;
+    box-shadow:
+        0 18px 34px rgba(6, 182, 212, 0.48),
+        0 0 0 1px rgba(165, 243, 252, 0.45) inset !important;
+}
+[data-testid="stSidebarCollapseButton"] button:focus-visible,
+[data-testid="collapsedControl"] button:focus-visible,
+[data-testid="stSidebarCollapsedControl"] button:focus-visible,
+button[kind="header"]:focus-visible,
+button[aria-label*="sidebar" i]:focus-visible,
+button[title*="sidebar" i]:focus-visible {
+    outline: 2px solid rgba(103, 232, 249, 0.5) !important;
+    outline-offset: 2px !important;
+}
+[data-testid="stSidebarCollapseButton"] button svg,
+[data-testid="collapsedControl"] button svg,
+[data-testid="stSidebarCollapsedControl"] button svg,
+[data-testid="stExpandSidebarButton"] svg,
+[data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"],
+button[kind="header"] svg,
+button[aria-label*="sidebar" i] svg,
+button[title*="sidebar" i] svg {
+    color: #cde9ff !important;
+    fill: currentColor !important;
+}
+[data-testid="collapsedControl"] button svg,
+[data-testid="stSidebarCollapsedControl"] button svg {
+    width: 1.15rem !important;
+    height: 1.15rem !important;
+    color: #f0f9ff !important;
+}
+[data-testid="collapsedControl"]::after,
+[data-testid="stSidebarCollapsedControl"]::after,
+[data-testid="stExpandSidebarButton"]::after {
+    content: "Open Trading Controls";
+    display: flex;
+    align-items: center;
+    position: absolute;
+    left: calc(100% + 0.52rem);
+    top: 50%;
+    transform: translateY(-50%);
+    white-space: nowrap;
+    height: 30px;
+    padding: 0 0.62rem;
+    border-radius: 999px;
+    border: 1px solid #33587d;
+    background: rgba(8, 20, 39, 0.88);
+    color: #d9ecff;
+    font-size: 0.67rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    box-shadow: 0 8px 18px rgba(2, 8, 20, 0.42);
+    pointer-events: none;
+}
+@media (max-width: 920px) {
+    [data-testid="collapsedControl"]::after,
+    [data-testid="stSidebarCollapsedControl"]::after,
+    [data-testid="stExpandSidebarButton"]::after {
+        content: "Open Controls";
+    }
+}
+[data-testid="stSidebar"] * { box-sizing: border-box !important; }
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 0.4rem; }
+[data-testid="stSidebar"] [data-testid="stExpander"] {
+    margin-bottom: 0.3rem;
+}
+[data-testid="stSidebar"] [data-testid="stElementContainer"],
+[data-testid="stSidebar"] [data-testid="stExpanderDetails"],
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow-x: hidden !important;
+}
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] * {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+[data-testid="stSidebar"] [data-testid="stLogoSpacer"] {
+    display: none !important;
+    height: 0 !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+[data-testid="stSidebar"] [data-testid="stSidebarHeader"] {
+    min-height: 0 !important;
+    height: auto !important;
+    padding: 0.22rem 0.35rem 0.08rem 0.35rem !important;
+    margin: 0 !important;
+}
+[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+    padding-top: 0 !important;
+    margin-top: 0 !important;
+}
+[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {
+    padding-top: 0.08rem !important;
+    margin-top: 0 !important;
+}
+[data-testid="stSidebar"] .section-header {
+    margin: 0.28rem 0 0.45rem 0 !important;
+    padding-bottom: 0.42rem !important;
+}
+[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] > div:first-child {
+    margin-top: 0 !important;
+    padding-top: 0 !important;
+}
 [data-testid="stHeader"] {
     background: transparent !important;
     backdrop-filter: none !important;
@@ -82,10 +310,28 @@ footer { visibility: hidden; }
     min-height: 0 !important;
     height: 0 !important;
 }
-[data-testid="block-container"] {
-    padding-top: 1rem;
+[data-testid="stMainBlockContainer"],
+[data-testid="block-container"],
+.block-container {
+    padding-top: 0 !important;
     padding-bottom: 1.25rem;
     max-width: 1360px;
+}
+[data-testid="stMain"],
+main[data-testid="stMain"] {
+    padding-top: 0 !important;
+    margin-top: 0 !important;
+}
+[data-testid="stMain"] > div,
+main[data-testid="stMain"] > div {
+    padding-top: 0 !important;
+    margin-top: 0 !important;
+}
+[data-testid="stMainBlockContainer"] > div:first-child,
+[data-testid="block-container"] > div:first-child,
+.block-container > div:first-child {
+    margin-top: 0 !important;
+    padding-top: 0 !important;
 }
 
 h1, h2, h3, h4, h5, h6 { color: var(--text-main); letter-spacing: -0.015em; }
@@ -109,9 +355,11 @@ hr { border-color: rgba(54, 81, 114, 0.75) !important; }
     gap: 1rem;
     padding: 1rem 1.1rem 1.03rem 1.1rem;
     border-radius: var(--radius-lg);
-    border: 1px solid var(--border-0);
-    background: linear-gradient(135deg, rgba(8, 18, 35, 0.95), rgba(11, 25, 48, 0.95));
-    box-shadow: var(--shadow-lg);
+    border: 1px solid var(--glass-border);
+    background: linear-gradient(140deg, rgba(8, 18, 35, 0.74), rgba(12, 29, 53, 0.66));
+    backdrop-filter: blur(var(--glass-blur)) saturate(135%);
+    box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
+    margin-top: -0.28rem;
     margin-bottom: 0.55rem;
 }
 .hero-shell::after {
@@ -122,7 +370,7 @@ hr { border-color: rgba(54, 81, 114, 0.75) !important; }
     right: -130px;
     bottom: -140px;
     border-radius: 999px;
-    background: radial-gradient(circle, rgba(34, 211, 238, 0.24) 0%, rgba(34, 211, 238, 0) 74%);
+    background: radial-gradient(circle, rgba(34, 211, 238, 0.3) 0%, rgba(34, 211, 238, 0) 74%);
     pointer-events: none;
 }
 .hero-logo {
@@ -240,8 +488,10 @@ hr { border-color: rgba(54, 81, 114, 0.75) !important; }
     position: relative;
     overflow: hidden;
     border-radius: var(--radius-md);
-    border: 1px solid var(--border-0);
-    background: linear-gradient(160deg, var(--surface-1) 0%, var(--surface-2) 100%);
+    border: 1px solid var(--glass-border);
+    background: linear-gradient(160deg, rgba(10, 22, 42, 0.66) 0%, rgba(14, 31, 57, 0.58) 100%);
+    backdrop-filter: blur(calc(var(--glass-blur) - 2px)) saturate(130%);
+    box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
     padding: 15px 18px;
     transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.22s ease;
 }
@@ -302,14 +552,16 @@ hr { border-color: rgba(54, 81, 114, 0.75) !important; }
     color: #d0def1;
     font-size: 0.75rem;
     white-space: nowrap;
-    border: 1px solid #2f4663;
-    background: linear-gradient(140deg, rgba(9, 20, 39, 0.86), rgba(18, 37, 64, 0.9));
+    border: 1px solid var(--glass-border);
+    background: linear-gradient(140deg, rgba(9, 20, 39, 0.6), rgba(18, 37, 64, 0.54));
+    backdrop-filter: blur(calc(var(--glass-blur) - 1px)) saturate(132%);
+    box-shadow: inset 0 1px 0 rgba(186, 230, 253, 0.1);
     transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.2s ease;
 }
 .focus-chip:hover {
     transform: translateY(-1px);
-    border-color: #4d719a;
-    box-shadow: 0 8px 20px rgba(8, 47, 73, 0.38);
+    border-color: var(--glass-border-bright);
+    box-shadow: 0 10px 24px rgba(8, 47, 73, 0.34);
 }
 .focus-chip b {
     color: #67e8f9;
@@ -319,15 +571,17 @@ hr { border-color: rgba(54, 81, 114, 0.75) !important; }
 }
 
 .event-card {
-    background: linear-gradient(145deg, rgba(11, 22, 42, 0.95), rgba(15, 31, 58, 0.93));
-    border: 1px solid #2d4563;
+    background: linear-gradient(145deg, rgba(11, 22, 42, 0.66), rgba(15, 31, 58, 0.58));
+    border: 1px solid var(--glass-border);
     border-radius: 11px;
     padding: 13px 16px;
     margin-bottom: 9px;
+    backdrop-filter: blur(calc(var(--glass-blur) - 1px)) saturate(128%);
+    box-shadow: inset 0 1px 0 rgba(186, 230, 253, 0.1);
     transition: border-color 0.18s ease, transform 0.18s ease;
 }
 .event-card:hover {
-    border-color: #4a7098;
+    border-color: var(--glass-border-bright);
     transform: translateY(-1px);
 }
 .event-card.bullish { border-left: 4px solid #22c55e; }
@@ -348,12 +602,14 @@ hr { border-color: rgba(54, 81, 114, 0.75) !important; }
 .alert-info    { background: linear-gradient(135deg, rgba(8, 47, 73, 0.84), rgba(14, 116, 144, 0.8)); color: #bae6fd; border-color: rgba(56, 189, 248, 0.5); }
 
 .stat-card {
-    background: linear-gradient(145deg, rgba(12, 24, 46, 0.94), rgba(16, 32, 60, 0.9));
-    border: 1px solid #304a69;
+    background: linear-gradient(145deg, rgba(12, 24, 46, 0.64), rgba(16, 32, 60, 0.56));
+    border: 1px solid var(--glass-border);
     border-radius: var(--radius-sm);
     padding: 14px 17px;
     text-align: center;
     margin-bottom: 8px;
+    backdrop-filter: blur(calc(var(--glass-blur) - 1px)) saturate(130%);
+    box-shadow: inset 0 1px 0 rgba(186, 230, 253, 0.1);
 }
 .stat-label {
     color: var(--text-dim);
@@ -372,9 +628,10 @@ hr { border-color: rgba(54, 81, 114, 0.75) !important; }
 .ticker-wrap {
     overflow: hidden;
     border-radius: var(--radius-sm);
-    border: 1px solid #2f4766;
-    background: linear-gradient(90deg, rgba(8, 18, 36, 0.98), rgba(11, 27, 49, 0.95), rgba(8, 18, 36, 0.98));
-    box-shadow: inset 0 1px 0 rgba(103, 232, 249, 0.08);
+    border: 1px solid var(--glass-border);
+    background: linear-gradient(90deg, rgba(8, 18, 36, 0.74), rgba(11, 27, 49, 0.66), rgba(8, 18, 36, 0.74));
+    backdrop-filter: blur(calc(var(--glass-blur) - 2px)) saturate(122%);
+    box-shadow: inset 0 1px 0 rgba(103, 232, 249, 0.12);
     padding: 9px 0;
     margin-bottom: 20px;
 }
@@ -395,16 +652,17 @@ hr { border-color: rgba(54, 81, 114, 0.75) !important; }
 
 [data-testid="stTabs"] {
     border-radius: var(--radius-md);
-    border: 1px solid #2f4766;
-    background: rgba(9, 20, 39, 0.88);
-    backdrop-filter: blur(5px);
+    border: 1px solid var(--glass-border);
+    background: var(--glass-pane-soft);
+    backdrop-filter: blur(var(--glass-blur)) saturate(128%);
+    box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
     margin-top: 8px;
 }
 [data-testid="stTabs"] > div:first-child {
-    background: linear-gradient(90deg, rgba(8, 18, 35, 0.92), rgba(12, 28, 51, 0.95));
+    background: linear-gradient(90deg, rgba(8, 18, 35, 0.66), rgba(12, 28, 51, 0.6));
     border-radius: 12px 12px 0 0;
     padding: 6px 8px 0 8px;
-    border-bottom: 1px solid #2f4766;
+    border-bottom: 1px solid var(--glass-border);
     gap: 4px;
     overflow-x: auto;
     scrollbar-width: none;
@@ -424,19 +682,21 @@ hr { border-color: rgba(54, 81, 114, 0.75) !important; }
     transition: all 0.17s ease;
 }
 [data-testid="stTab"]:hover {
-    background: rgba(20, 40, 68, 0.8) !important;
+    background: rgba(20, 40, 68, 0.56) !important;
     color: #cbe8ff !important;
-    border-color: #3f5f85 !important;
+    border-color: var(--glass-border-bright) !important;
 }
 [data-testid="stTab"][aria-selected="true"] {
-    background: linear-gradient(135deg, rgba(8, 47, 73, 0.74), rgba(14, 116, 144, 0.68)) !important;
+    background: linear-gradient(135deg, rgba(8, 47, 73, 0.6), rgba(14, 116, 144, 0.52)) !important;
     color: #e0f2fe !important;
-    border-color: #4f7ca8 !important;
-    box-shadow: inset 0 -2px 0 #67e8f9;
+    border-color: var(--glass-border-bright) !important;
+    box-shadow: inset 0 -2px 0 #67e8f9, inset 0 1px 0 rgba(186, 230, 253, 0.16);
 }
 [data-testid="stTabPanel"] {
-    background: rgba(8, 18, 35, 0.84);
+    background: linear-gradient(145deg, rgba(8, 18, 35, 0.52), rgba(12, 26, 49, 0.5));
     border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+    border-top: 1px solid rgba(186, 230, 253, 0.08);
+    backdrop-filter: blur(calc(var(--glass-blur) - 2px)) saturate(120%);
     padding: 18px 16px !important;
 }
 
@@ -471,18 +731,115 @@ div[data-testid="stRadio"] label:has(input:checked) p { color: #ecfeff !importan
 [data-testid="stNumberInput"] input,
 [data-testid="stTextInput"] input,
 [data-testid="stMultiSelect"] > div > div {
-    background: rgba(11, 24, 46, 0.92) !important;
-    border: 1px solid #304969 !important;
-    border-radius: var(--radius-sm) !important;
+    background: var(--glass-pane-strong) !important;
+    border: 1px solid var(--glass-border) !important;
+    border-radius: var(--control-radius) !important;
     color: var(--text-main) !important;
     font-size: 0.81rem !important;
+    min-height: var(--control-height) !important;
+    backdrop-filter: blur(calc(var(--glass-blur) - 2px)) saturate(126%);
+    transition: border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease !important;
+}
+[data-testid="stSelectbox"],
+[data-testid="stMultiSelect"] {
+    margin-bottom: 0.26rem;
+}
+[data-testid="stSelectbox"] [data-baseweb="select"] > div,
+[data-testid="stMultiSelect"] [data-baseweb="select"] > div {
+    min-height: var(--control-height) !important;
+    border-radius: var(--control-radius) !important;
+    background: linear-gradient(150deg, rgba(10, 23, 44, 0.76), rgba(11, 28, 52, 0.68)) !important;
+    border: 1px solid var(--glass-border) !important;
+    box-shadow: inset 0 1px 0 var(--glass-highlight) !important;
+}
+[data-testid="stSelectbox"] [data-baseweb="select"] > div:hover,
+[data-testid="stMultiSelect"] [data-baseweb="select"] > div:hover {
+    background: linear-gradient(150deg, rgba(12, 30, 55, 0.78), rgba(14, 34, 62, 0.72)) !important;
+    border-color: var(--glass-border-bright) !important;
+}
+[data-testid="stSelectbox"] [data-baseweb="select"] span,
+[data-testid="stSelectbox"] [data-baseweb="select"] div,
+[data-testid="stMultiSelect"] [data-baseweb="select"] span,
+[data-testid="stMultiSelect"] [data-baseweb="select"] div {
+    color: var(--text-main) !important;
+    font-size: 0.82rem !important;
+    letter-spacing: 0.01em;
+}
+[data-testid="stSelectbox"] [data-baseweb="select"] [aria-hidden="true"] svg,
+[data-testid="stMultiSelect"] [data-baseweb="select"] [aria-hidden="true"] svg {
+    color: #a7c4e4 !important;
+    fill: currentColor !important;
+}
+[data-testid="stMultiSelect"] [data-baseweb="tag"] {
+    border-radius: 999px !important;
+    border: 1px solid rgba(125, 211, 252, 0.36) !important;
+    background: linear-gradient(135deg, rgba(10, 34, 61, 0.72), rgba(12, 58, 90, 0.6)) !important;
+    backdrop-filter: blur(calc(var(--glass-blur) - 2px));
+    color: #dff7ff !important;
+    font-size: 0.75rem !important;
+    font-weight: 700 !important;
+}
+[data-testid="stMultiSelect"] [data-baseweb="tag"] [role="button"] {
+    color: #c4e8ff !important;
+}
+[data-baseweb="popover"] [role="listbox"] {
+    background: linear-gradient(165deg, rgba(8, 21, 41, 0.8), rgba(12, 30, 56, 0.78)) !important;
+    border: 1px solid var(--glass-border) !important;
+    border-radius: 12px !important;
+    backdrop-filter: blur(calc(var(--glass-blur) + 3px)) saturate(128%);
+    box-shadow: 0 18px 36px rgba(2, 8, 20, 0.5), inset 0 1px 0 var(--glass-highlight) !important;
+    padding: 0.34rem !important;
+}
+[data-baseweb="popover"] [role="option"] {
+    border-radius: 9px !important;
+    margin: 0.06rem 0 !important;
+    padding: 0.43rem 0.58rem !important;
+    color: #c9ddf3 !important;
+    font-size: 0.8rem !important;
+    transition: background-color 0.12s ease, color 0.12s ease !important;
+}
+[data-baseweb="popover"] [role="option"]:hover {
+    background: rgba(34, 211, 238, 0.12) !important;
+    color: #ecfeff !important;
+}
+[data-baseweb="popover"] [role="option"][aria-selected="true"] {
+    background: linear-gradient(135deg, rgba(8, 65, 98, 0.58), rgba(14, 116, 144, 0.52)) !important;
+    color: #ecfeff !important;
+    border: 1px solid var(--glass-border-bright) !important;
+}
+[data-baseweb="popover"] [role="option"] [data-testid="stMarkdownContainer"] p,
+[data-baseweb="popover"] [role="option"] p {
+    color: inherit !important;
+    font-size: 0.8rem !important;
+    margin: 0 !important;
+}
+[data-testid="stSelectbox"] [data-baseweb="select"] [aria-disabled="true"],
+[data-testid="stMultiSelect"] [data-baseweb="select"] [aria-disabled="true"] {
+    opacity: 0.62 !important;
+}
+[data-testid="stColumn"] [data-testid="stSelectbox"],
+[data-testid="stColumn"] [data-testid="stMultiSelect"] {
+    width: 100% !important;
+}
+.control-action-label {
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin: 0 0 0.32rem 0.08rem;
 }
 [data-testid="stSelectbox"] > div > div:focus-within,
 [data-testid="stTextInput"] input:focus,
 [data-testid="stNumberInput"] input:focus,
 [data-testid="stMultiSelect"] > div > div:focus-within {
     border-color: #67e8f9 !important;
-    box-shadow: 0 0 0 2px rgba(103, 232, 249, 0.2) !important;
+    box-shadow: 0 0 0 2px var(--control-focus) !important;
+}
+[data-testid="stSelectbox"] [data-baseweb="select"] > div:focus-within,
+[data-testid="stMultiSelect"] [data-baseweb="select"] > div:focus-within {
+    border-color: #67e8f9 !important;
+    box-shadow: 0 0 0 2px var(--control-focus) !important;
 }
 
 [data-testid="stButton"] > button {
@@ -505,12 +862,14 @@ div[data-testid="stRadio"] label:has(input:checked) p { color: #ecfeff !importan
     transform: translateY(-1px);
 }
 [data-testid="stButton"] > button:not([kind="primary"]) {
-    background: linear-gradient(135deg, rgba(11, 24, 46, 0.88), rgba(20, 40, 68, 0.88)) !important;
-    border: 1px solid #324c6e !important;
+    background: linear-gradient(135deg, rgba(11, 24, 46, 0.56), rgba(20, 40, 68, 0.5)) !important;
+    border: 1px solid var(--glass-border) !important;
+    backdrop-filter: blur(calc(var(--glass-blur) - 3px));
+    box-shadow: inset 0 1px 0 var(--glass-highlight);
     color: var(--text-soft) !important;
 }
 [data-testid="stButton"] > button:not([kind="primary"]):hover {
-    border-color: #67e8f9 !important;
+    border-color: var(--glass-border-bright) !important;
     color: #e0f2fe !important;
 }
 
@@ -527,8 +886,10 @@ div[data-testid="stRadio"] label:has(input:checked) p { color: #ecfeff !importan
 
 [data-testid="stExpander"] {
     border-radius: var(--radius-sm) !important;
-    border: 1px solid #2c4361 !important;
-    background: linear-gradient(145deg, rgba(9, 20, 39, 0.9), rgba(13, 28, 52, 0.9)) !important;
+    border: 1px solid var(--glass-border) !important;
+    background: linear-gradient(145deg, rgba(9, 20, 39, 0.62), rgba(13, 28, 52, 0.56)) !important;
+    backdrop-filter: blur(var(--glass-blur)) saturate(125%);
+    box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
     overflow: hidden;
 }
 [data-testid="stExpander"] summary {
@@ -538,14 +899,15 @@ div[data-testid="stRadio"] label:has(input:checked) p { color: #ecfeff !importan
 [data-testid="stExpander"] summary span { font-weight: 700 !important; }
 
 [data-testid="stPlotlyChart"] {
-    border: 1px solid #2b4362;
+    border: 1px solid var(--glass-border);
     border-radius: var(--radius-md);
     padding: 4px;
     width: 100%;
     box-sizing: border-box;
     overflow: hidden;
-    background: linear-gradient(145deg, rgba(9, 20, 39, 0.75), rgba(12, 26, 49, 0.72));
-    box-shadow: inset 0 1px 0 rgba(103, 232, 249, 0.07);
+    background: linear-gradient(145deg, rgba(9, 20, 39, 0.56), rgba(12, 26, 49, 0.48));
+    backdrop-filter: blur(calc(var(--glass-blur) - 2px)) saturate(122%);
+    box-shadow: var(--glass-shadow), inset 0 1px 0 rgba(103, 232, 249, 0.11);
 }
 
 [data-testid="stSpinner"] { color: #22d3ee !important; }
@@ -560,8 +922,9 @@ div[data-testid="stRadio"] label:has(input:checked) p { color: #ecfeff !importan
     gap: 0.36rem;
     margin-bottom: 0.4rem;
     border-radius: 999px;
-    border: 1px solid #2e4968;
-    background: rgba(8, 18, 35, 0.82);
+    border: 1px solid var(--glass-border);
+    background: rgba(8, 18, 35, 0.56);
+    backdrop-filter: blur(calc(var(--glass-blur) - 3px));
     color: #9bb3d4;
     font-size: 0.66rem;
     font-weight: 700;
@@ -582,8 +945,9 @@ div[data-testid="stRadio"] label:has(input:checked) p { color: #ecfeff !importan
     align-items: center;
     gap: 0.36rem;
     border-radius: 999px;
-    border: 1px solid #2d4563;
-    background: rgba(8, 18, 35, 0.78);
+    border: 1px solid var(--glass-border);
+    background: rgba(8, 18, 35, 0.54);
+    backdrop-filter: blur(calc(var(--glass-blur) - 3px));
     padding: 0.2rem 0.56rem;
     font-size: 0.69rem;
     font-weight: 700;
@@ -621,9 +985,11 @@ div[data-testid="stRadio"] label:has(input:checked) p { color: #ecfeff !importan
 .workspace-focus-card {
     position: relative;
     overflow: hidden;
-    border: 1px solid #2d4563;
+    border: 1px solid var(--glass-border);
     border-radius: var(--radius-md);
-    background: linear-gradient(145deg, rgba(9, 20, 39, 0.92), rgba(12, 28, 52, 0.94));
+    background: linear-gradient(145deg, rgba(9, 20, 39, 0.62), rgba(12, 28, 52, 0.56));
+    backdrop-filter: blur(var(--glass-blur)) saturate(128%);
+    box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
     padding: 0.72rem 0.9rem 0.72rem 1rem;
     margin: 0.08rem 0 0.58rem 0;
 }
@@ -650,8 +1016,9 @@ div[data-testid="stRadio"] label:has(input:checked) p { color: #ecfeff !importan
     color: #e7f3ff;
 }
 .workspace-focus-badge {
-    border: 1px solid #355173;
-    background: rgba(11, 28, 52, 0.8);
+    border: 1px solid var(--glass-border);
+    background: rgba(11, 28, 52, 0.54);
+    backdrop-filter: blur(calc(var(--glass-blur) - 4px));
     color: #9dc0e7;
     border-radius: 999px;
     font-size: 0.62rem;
@@ -666,6 +1033,16 @@ div[data-testid="stRadio"] label:has(input:checked) p { color: #ecfeff !importan
     font-size: 0.8rem;
     line-height: 1.42;
 }
+.workspace-focus-status {
+    margin-top: 0.24rem;
+    color: #97b3d8;
+    font-size: 0.72rem;
+    letter-spacing: 0.02em;
+}
+.workspace-focus-status b {
+    color: #dff2ff;
+    font-weight: 800;
+}
 .workspace-focus-tip {
     margin-top: 0.2rem;
     color: #86a4cb;
@@ -678,15 +1055,64 @@ div[data-testid="stRadio"] label:has(input:checked) p { color: #ecfeff !importan
     margin: 0.08rem 0 0.35rem 0;
     letter-spacing: 0.02em;
 }
+.command-bar-note {
+    color: #9ab7da;
+    font-size: 0.72rem;
+    letter-spacing: 0.03em;
+    margin: 0.08rem 0 0.26rem 0;
+}
+/* Reliable scoped styling via Streamlit key classes */
+.st-key-command_bar_shell {
+    border: 1px solid var(--glass-border);
+    border-radius: 14px;
+    padding: 0.54rem 0.62rem 0.42rem 0.62rem;
+    background: linear-gradient(145deg, rgba(8, 18, 35, 0.52), rgba(12, 27, 50, 0.48));
+    backdrop-filter: blur(calc(var(--glass-blur) - 2px)) saturate(125%);
+    box-shadow:
+        0 12px 28px rgba(2, 8, 20, 0.26),
+        inset 0 1px 0 var(--glass-highlight);
+    margin: 0 0 0.52rem 0;
+}
+.st-key-command_bar_shell [data-testid="stHorizontalBlock"] {
+    align-items: end;
+}
+.st-key-workspace_command_pick [data-baseweb="select"] > div {
+    min-height: 44px !important;
+    border-radius: 13px !important;
+    border: 1px solid rgba(125, 211, 252, 0.44) !important;
+    background: linear-gradient(150deg, rgba(9, 28, 52, 0.88), rgba(12, 38, 66, 0.82)) !important;
+    box-shadow:
+        0 12px 28px rgba(2, 8, 20, 0.3),
+        inset 0 1px 0 rgba(186, 230, 253, 0.2) !important;
+    backdrop-filter: blur(calc(var(--glass-blur) - 1px)) saturate(135%);
+    transition: border-color 0.16s ease, box-shadow 0.16s ease, background-color 0.16s ease !important;
+}
+.st-key-workspace_command_pick [data-baseweb="select"] > div:hover {
+    border-color: #67e8f9 !important;
+    background: linear-gradient(150deg, rgba(10, 34, 61, 0.9), rgba(14, 44, 75, 0.84)) !important;
+}
+.st-key-workspace_command_pick [data-baseweb="select"] > div:focus-within {
+    border-color: #67e8f9 !important;
+    box-shadow:
+        0 0 0 2px rgba(103, 232, 249, 0.24),
+        inset 0 1px 0 rgba(186, 230, 253, 0.22) !important;
+}
+.st-key-workspace_command_pick [data-baseweb="select"] span,
+.st-key-workspace_command_pick [data-baseweb="select"] div {
+    color: #ecf8ff !important;
+    font-weight: 700 !important;
+}
 .workspace-active-chip {
     display: inline-flex;
     align-items: center;
     gap: 0.38rem;
     margin-top: 0.46rem;
-    border: 1px solid #304a69;
+    border: 1px solid var(--glass-border);
     border-radius: 999px;
     padding: 0.22rem 0.58rem;
-    background: rgba(10, 23, 44, 0.86);
+    background: rgba(10, 23, 44, 0.52);
+    backdrop-filter: blur(calc(var(--glass-blur) - 4px));
+    box-shadow: inset 0 1px 0 rgba(186, 230, 253, 0.1);
     color: #9cb8da;
     font-size: 0.71rem;
     letter-spacing: 0.03em;
@@ -694,6 +1120,45 @@ div[data-testid="stRadio"] label:has(input:checked) p { color: #ecfeff !importan
 .workspace-active-chip b {
     color: #d7e9ff;
     font-weight: 800;
+}
+.context-rail {
+    position: sticky;
+    top: 0.28rem;
+    z-index: 38;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.44rem;
+    margin: 0.14rem 0 0.58rem 0;
+    padding: 0.4rem 0.46rem;
+    border: 1px solid var(--glass-border);
+    border-radius: 12px;
+    background: linear-gradient(145deg, rgba(9, 20, 39, 0.56), rgba(12, 27, 49, 0.52));
+    box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
+    backdrop-filter: blur(var(--glass-blur)) saturate(125%);
+}
+.context-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.36rem;
+    border: 1px solid rgba(129, 161, 202, 0.35);
+    border-radius: 999px;
+    padding: 0.19rem 0.52rem;
+    background: rgba(7, 18, 35, 0.48);
+    backdrop-filter: blur(calc(var(--glass-blur) - 3px));
+    color: #c7dbf3;
+    font-size: 0.7rem;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+}
+.context-pill b {
+    color: #9fdbff;
+    font-size: 0.63rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.context-pill .context-live {
+    color: #bbf7d0;
+    font-weight: 700;
 }
 .snapshot-note {
     color: #8ea8ca;
@@ -717,9 +1182,10 @@ div[data-testid="stRadio"] label:has(input:checked) p { color: #ecfeff !importan
 }
 
 .skeleton-wrap {
-    border: 1px solid #2c4462;
+    border: 1px solid var(--glass-border);
     border-radius: var(--radius-sm);
-    background: rgba(9, 21, 41, 0.84);
+    background: rgba(9, 21, 41, 0.52);
+    backdrop-filter: blur(calc(var(--glass-blur) - 2px));
     padding: 0.8rem;
     margin: 0.3rem 0 0.65rem 0;
 }
@@ -751,18 +1217,34 @@ textarea:focus-visible,
 
 @media (max-width: 1180px) {
     [data-testid="stMetricValue"] { font-size: 1.28rem; }
-    [data-testid="block-container"] { max-width: 100%; }
+    [data-testid="stMainBlockContainer"],
+    [data-testid="block-container"],
+    .block-container { max-width: 100%; }
 }
 
 @media (max-width: 900px) {
-    [data-testid="block-container"] {
+    [data-testid="stMainBlockContainer"],
+    [data-testid="block-container"],
+    .block-container {
         padding-left: 0.82rem;
         padding-right: 0.82rem;
-        padding-top: 0.72rem;
+        padding-top: 0 !important;
     }
     .hero-shell { padding: 0.82rem 0.9rem; border-radius: 13px; align-items: center; }
     .hero-title { font-size: 1.58rem; line-height: 1.2; }
     .hero-meta { row-gap: 0.42rem; }
+    .context-rail {
+        position: relative;
+        top: 0;
+        gap: 0.32rem;
+        padding: 0.34rem;
+        border-radius: 10px;
+    }
+    .context-pill {
+        flex: 1 1 calc(50% - 0.26rem);
+        min-width: 0;
+        justify-content: space-between;
+    }
     .focus-chip {
         width: 100%;
         justify-content: space-between;
@@ -771,7 +1253,15 @@ textarea:focus-visible,
 }
 
 @media (max-width: 680px) {
-    [data-testid="block-container"] { padding-bottom: 5.6rem; }
+    [data-testid="stMainBlockContainer"],
+    [data-testid="block-container"],
+    .block-container { padding-bottom: 5.6rem; }
+    .context-pill {
+        flex: 1 1 100%;
+        font-size: 0.66rem;
+    }
+    .context-pill:nth-child(n+6) { display: none; }
+    .command-bar-note { font-size: 0.68rem; }
     .hero-shell {
         flex-direction: column;
         align-items: flex-start;
@@ -808,7 +1298,9 @@ if _ui_density_profile not in ("Pro", "Airy"):
 if _ui_density_profile == "Airy":
     st.markdown("""
     <style>
-    [data-testid="block-container"] { max-width: 1440px; }
+    [data-testid="stMainBlockContainer"],
+    [data-testid="block-container"],
+    .block-container { max-width: 1440px; }
     [data-testid="stMarkdownContainer"] p { font-size: 0.95rem; line-height: 1.56; }
     [data-testid="stMetric"] { padding: 18px 22px; border-radius: 16px; }
     [data-testid="stMetricValue"] { font-size: 1.58rem; }
@@ -816,7 +1308,9 @@ if _ui_density_profile == "Airy":
     [data-testid="stSelectbox"] > div > div,
     [data-testid="stNumberInput"] input,
     [data-testid="stTextInput"] input,
-    [data-testid="stMultiSelect"] > div > div { min-height: 42px; border-radius: 12px !important; }
+    [data-testid="stMultiSelect"] > div > div,
+    [data-testid="stSelectbox"] [data-baseweb="select"] > div,
+    [data-testid="stMultiSelect"] [data-baseweb="select"] > div { min-height: 44px; border-radius: 13px !important; }
     .hero-shell { padding: 1.1rem 1.3rem; border-radius: 20px; }
     .hero-title { font-size: 2rem; }
     .focus-strip { gap: 10px; margin: 12px 0 15px 0; }
@@ -841,6 +1335,9 @@ def stat_card(label, value, color="#e2e8f0"):
 def focus_chips(items):
     chips = "".join(f'<span class="focus-chip"><b>{label}</b>{value}</span>' for label, value in items)
     st.markdown(f'<div class="focus-strip">{chips}</div>', unsafe_allow_html=True)
+
+def control_action_label(text: str = "Action"):
+    st.markdown(f'<div class="control-action-label">{text}</div>', unsafe_allow_html=True)
 
 def notify(text: str, kind: str = "info"):
     """Non-blocking UX feedback with graceful fallback on older Streamlit versions."""
@@ -920,10 +1417,12 @@ def render_workspace_focus(panel_id: str):
     desc = meta.get("desc", "Workspace panel")
     tip = meta.get("tip", "")
     accent = meta.get("accent", "#67e8f9")
+    status_line = f'Active panel <b>{panel_label}</b> · Updated <b>{time.strftime("%H:%M:%S")}</b>'
     st.markdown(
         f'<div class="workspace-focus-card" style="--panel-accent:{accent}">'
         f'<div class="workspace-focus-head"><span class="workspace-focus-title">{panel_label}</span>'
         f'<span class="workspace-focus-badge">{group}</span></div>'
+        f'<div class="workspace-focus-status">{status_line}</div>'
         f'<div class="workspace-focus-text">{desc}</div>'
         f'<div class="workspace-focus-tip">Tip: {tip}</div>'
         f'</div>',
@@ -944,63 +1443,141 @@ def render_panel_nav(active_panel_id: str) -> str:
     if st.session_state["workspace_panel_group"] not in group_names:
         st.session_state["workspace_panel_group"] = group_names[0]
 
-    st.markdown('<div class="workspace-nav-note">Step 1: choose a lane. Step 2: choose a panel.</div>', unsafe_allow_html=True)
-    nav_left, nav_right = st.columns([1.0, 2.4], gap="small")
-    with nav_left:
-        group_choice = st.selectbox("Lane", group_names, key="workspace_panel_group", label_visibility="collapsed")
+    st.markdown('<div class="workspace-nav-note">Choose lane, then panel.</div>', unsafe_allow_html=True)
+    lane_icons = {"Trade Desk": "◈", "Research": "◬", "Setup": "◫"}
+    group_choice = st.radio(
+        "Lane",
+        group_names,
+        horizontal=True,
+        key="workspace_panel_group",
+        label_visibility="collapsed",
+        format_func=lambda g: f'{lane_icons.get(g, "◉")} {g}',
+    )
     group_panels = _PANEL_GROUPS[group_choice]
     current_panel = st.session_state.get("workspace_panel_nav", active_panel_id)
     if current_panel not in group_panels:
         st.session_state["workspace_panel_nav"] = group_panels[0]
 
-    with nav_right:
-        selected_id = st.radio(
-            "Workspace panel",
-            group_panels,
-            horizontal=True,
-            label_visibility="collapsed",
-            key="workspace_panel_nav",
-            format_func=lambda pid: f'{panel_lookup[pid]["icon"]} {panel_lookup[pid]["label"]}',
-        )
+    selected_id = st.radio(
+        "Workspace panel",
+        group_panels,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="workspace_panel_nav",
+        format_func=lambda pid: f'{panel_lookup[pid]["icon"]} {panel_lookup[pid]["label"]}',
+    )
+    st.markdown(
+        f'<div class="workspace-active-chip"><b>Active</b>{panel_lookup[selected_id]["label"]}</div>',
+        unsafe_allow_html=True,
+    )
     return selected_id
 
-def request_workspace_panel(panel_id: str):
+def request_workspace_panel(panel_id: str, rerun_now: bool = True):
     if panel_id not in _PANEL_BY_ID:
         return
     st.session_state["workspace_panel_requested"] = panel_id
-    st.rerun()
+    if rerun_now:
+        st.rerun()
+
+
+def _sync_overview_focus_symbol():
+    picked = st.session_state.get("overview_focus_pick")
+    if picked:
+        st.session_state["detail_sym"] = picked
+
+
+def _execute_workspace_command(command: str, rerun_now: bool = True) -> tuple[bool, str]:
+    if command == "refresh":
+        if rerun_now:
+            st.rerun()
+        return True, "Refreshed current view."
+    if command.startswith("goto:"):
+        target = command.split(":", 1)[1]
+        request_workspace_panel(target, rerun_now=rerun_now)
+        return True, f'Switched to {_PANEL_BY_ID.get(target, target.title())}.'
+    if command == "toggle_snapshot":
+        first_key = "market_snapshot_first_open_done"
+        if first_key in st.session_state:
+            del st.session_state[first_key]
+        else:
+            st.session_state[first_key] = True
+        if rerun_now:
+            st.rerun()
+        return True, "Toggled Market Snapshot."
+    if command == "toggle_autorefresh":
+        st.session_state["auto_refresh_toggle"] = not bool(st.session_state.get("auto_refresh_toggle", False))
+        if rerun_now:
+            st.rerun()
+        return True, "Toggled Auto-refresh."
+    if command == "focus_first_symbol":
+        st.session_state["detail_sym"] = watchlist[0] if watchlist else "—"
+        request_workspace_panel("overview", rerun_now=rerun_now)
+        return True, "Focused first symbol in Overview."
+    return False, "Unknown command."
 
 def render_panel_quick_actions(panel_id: str):
-    panel_ids = [p["id"] for p in _PANEL_META]
-    if panel_id not in panel_ids:
-        panel_id = panel_ids[0]
-    idx = panel_ids.index(panel_id)
-    prev_id = panel_ids[idx - 1] if idx > 0 else panel_ids[-1]
-    next_id = panel_ids[(idx + 1) % len(panel_ids)]
-
     st.markdown('<div class="panel-quick-note">Quick actions</div>', unsafe_allow_html=True)
-    qa_prev, qa_next, qa_refresh, qa_jump, qa_go = st.columns([0.95, 0.95, 0.95, 1.75, 0.6], gap="small")
-    with qa_prev:
-        if st.button("← Prev", key=f"qa_prev_{panel_id}", use_container_width=True, help=f"Go to {_PANEL_BY_ID[prev_id]}"):
-            request_workspace_panel(prev_id)
-    with qa_next:
-        if st.button("Next →", key=f"qa_next_{panel_id}", use_container_width=True, help=f"Go to {_PANEL_BY_ID[next_id]}"):
-            request_workspace_panel(next_id)
+    qa_refresh, qa_state = st.columns([1.0, 3.0], gap="small")
     with qa_refresh:
-        if st.button("Refresh", key=f"qa_refresh_{panel_id}", use_container_width=True):
+        if st.button("Refresh Data", key=f"qa_refresh_{panel_id}", use_container_width=True):
             st.rerun()
-    with qa_jump:
-        jump_target = st.selectbox(
-            "Jump panel",
-            panel_ids,
-            index=idx,
-            key=f"qa_jump_{panel_id}",
-            format_func=lambda pid: _PANEL_BY_ID[pid],
-            label_visibility="collapsed",
+    with qa_state:
+        st.markdown(
+            f'<div class="workspace-subnote">Updated {time.strftime("%H:%M:%S")} · {panel_id.title()} panel</div>',
+            unsafe_allow_html=True,
         )
-    with qa_go:
-        if st.button("Go", key=f"qa_go_{panel_id}", use_container_width=True) and jump_target != panel_id:
-            request_workspace_panel(jump_target)
+
+
+def render_command_bar(active_panel_id: str):
+    panel_ids = [p["id"] for p in _PANEL_META]
+    _cmds = [("refresh", "Refresh current view")]
+    _cmds.extend([(f"goto:{pid}", _PANEL_BY_ID[pid]) for pid in panel_ids])
+    _cmds.extend([
+        ("toggle_snapshot", "Toggle Market Snapshot"),
+        ("toggle_autorefresh", "Toggle Auto-refresh"),
+        ("focus_first_symbol", "Focus first symbol (Overview)"),
+    ])
+    _cmd_map = {cid: label for cid, label in _cmds}
+    _default_cmd = f"goto:{active_panel_id}" if f"goto:{active_panel_id}" in _cmd_map else "refresh"
+    with st.container(key="command_bar_shell"):
+        st.markdown('<div class="command-bar-note">Command Bar</div>', unsafe_allow_html=True)
+        cmd_col, run_col = st.columns([3.2, 0.8], gap="small")
+        with cmd_col:
+            cmd_pick = st.selectbox(
+                "Command",
+                options=[cid for cid, _ in _cmds],
+                index=[cid for cid, _ in _cmds].index(_default_cmd),
+                format_func=lambda c: _cmd_map[c],
+                key="workspace_command_pick",
+            )
+        with run_col:
+            control_action_label("Run")
+            run_cmd = st.button("Run", key="workspace_command_run", use_container_width=True, type="primary")
+
+    if not run_cmd:
+        return
+    _execute_workspace_command(cmd_pick, rerun_now=True)
+
+
+def render_context_rail(panel_id: str, market_status_text: str, execution_state: str, watch_source: str, watchlist: list[str], timeframe: str):
+    panel_label = _PANEL_BY_ID.get(panel_id, "Overview")
+    focus_symbol = st.session_state.get("detail_sym")
+    if not focus_symbol or focus_symbol not in watchlist:
+        focus_symbol = watchlist[0] if watchlist else "—"
+    rail_items = [
+        ("Panel", panel_label, ""),
+        ("Focus", focus_symbol, ""),
+        ("Market", market_status_text, "context-live" if "Open" in market_status_text else ""),
+        ("Mode", execution_state, ""),
+        ("Universe", f'{watch_source.replace("_", " ").title()} · {len(watchlist)}', ""),
+        ("Timeframe", timeframe, ""),
+        ("Updated", time.strftime("%H:%M:%S"), ""),
+    ]
+    pills = "".join(
+        f'<span class="context-pill"><b>{label}</b><span class="{val_cls}">{value}</span></span>'
+        for label, value, val_cls in rail_items
+    )
+    st.markdown(f'<div class="context-rail">{pills}</div>', unsafe_allow_html=True)
 
 def render_market_snapshot(context_chips, health_items, portfolio_chips, tape_items):
     st.markdown('<div class="snapshot-note">Need a quick pulse? Open Market Snapshot.</div>', unsafe_allow_html=True)
@@ -1028,53 +1605,6 @@ def render_market_snapshot(context_chips, health_items, portfolio_chips, tape_it
             st.caption("Trending ticker feed unavailable right now.")
     if _snapshot_expanded:
         st.session_state[_first_snapshot_key] = True
-
-def apply_dashboard_preset(preset: str):
-    payload = {}
-    panel_id = None
-    if preset == "Scalping":
-        payload.update({
-            "watch_source": "trending",
-            "bar_timeframe": "1Min",
-            "chart_layout": "Dual",
-            "table_density": "Compact",
-            "ui_density_profile": "Pro",
-        })
-        panel_id = "charts"
-    elif preset == "Swing":
-        payload.update({
-            "watch_source": "my_list",
-            "bar_timeframe": "1Day",
-            "chart_layout": "Single",
-            "table_density": "Comfortable",
-            "ui_density_profile": "Airy",
-        })
-        panel_id = "overview"
-    elif preset == "Backtest":
-        payload.update({
-            "bar_timeframe": "1Day",
-            "chart_layout": "Single",
-            "table_density": "Compact",
-            "ui_density_profile": "Pro",
-        })
-        panel_id = "backtest"
-    elif preset == "Risk":
-        payload.update({
-            "watch_source": "my_list",
-            "bar_timeframe": "15Min",
-            "chart_layout": "Single",
-            "table_density": "Compact",
-            "ui_density_profile": "Pro",
-        })
-        panel_id = "positions"
-
-    payload["dashboard_preset"] = preset
-    if panel_id:
-        payload["dashboard_panel"] = _PANEL_BY_ID.get(panel_id, "Overview")
-    settings_store.save(payload)
-    if panel_id:
-        st.session_state["workspace_panel_nav"] = panel_id
-    st.rerun()
 
 def event_card(label, score, confidence, reason):
     if score > 0:   cls, icon, color = "bullish", "▲", "#34d399"
@@ -1189,6 +1719,12 @@ def html_table(rows, max_height=420, table_key=None, show_tools=True):
     _preset_density = settings_store.get("table_density", "Comfortable")
     _density_default_idx = 0 if _preset_density == "Compact" else 1
 
+    search_query = ""
+    sort_col = "(none)"
+    sort_desc = True
+    filter_col = "None"
+    filter_values = []
+
     if show_tools:
         cols_state_key = f"{table_key}_cols"
         schema_state_key = f"{table_key}_cols_schema"
@@ -1209,7 +1745,7 @@ def html_table(rows, max_height=420, table_key=None, show_tools=True):
                 st.session_state[schema_state_key] = list(cols)
 
         with st.expander("Table tools", expanded=False):
-            t1, t2, t3 = st.columns([1.1, 1.3, 2.6])
+            t1, t2, t3 = st.columns([1.05, 1.15, 2.8], gap="small")
             with t1:
                 density = st.radio(
                     "Density",
@@ -1227,6 +1763,41 @@ def html_table(rows, max_height=420, table_key=None, show_tools=True):
                     default=cols,
                     key=f"{table_key}_cols",
                 )
+            t4, t5, t6, t7 = st.columns([2.1, 1.15, 1.65, 0.8], gap="small")
+            with t4:
+                search_query = st.text_input(
+                    "Search rows",
+                    key=f"{table_key}_search",
+                    placeholder="Filter by symbol, reason, regime...",
+                ).strip()
+            with t5:
+                sort_col = st.selectbox(
+                    "Sort by",
+                    options=["(none)"] + cols,
+                    key=f"{table_key}_sort_col",
+                )
+            with t6:
+                filterable_cols = [c for c in ("Signal", "Regime", "side", "status") if c in cols]
+                filter_col = st.selectbox(
+                    "Filter",
+                    options=["None"] + filterable_cols,
+                    key=f"{table_key}_filter_col",
+                )
+            with t7:
+                sort_desc = st.toggle("Desc", value=True, key=f"{table_key}_sort_desc", disabled=sort_col == "(none)")
+            if filter_col != "None":
+                _unique_vals = sorted({
+                    str(r.get(filter_col, "—")).upper().strip()
+                    for r in rows
+                    if str(r.get(filter_col, "—")).strip() not in ("", "—")
+                })
+                filter_values = st.multiselect(
+                    f"{filter_col} values",
+                    options=_unique_vals,
+                    default=[],
+                    key=f"{table_key}_filter_vals",
+                    help="Leave empty to include all values.",
+                )
     else:
         density = "Comfortable"
         sticky_first = True
@@ -1234,6 +1805,49 @@ def html_table(rows, max_height=420, table_key=None, show_tools=True):
 
     if not visible_cols:
         visible_cols = cols
+
+    def _coerce_sort_key(value):
+        if value is None:
+            return (2, "")
+        if isinstance(value, (int, float)):
+            return (0, float(value))
+        sval = str(value).strip()
+        if sval in ("", "—"):
+            return (2, "")
+        cleaned = (
+            sval.replace("$", "")
+            .replace(",", "")
+            .replace("%", "")
+            .replace("▲", "")
+            .replace("▼", "")
+            .replace("+", "")
+            .strip()
+        )
+        try:
+            return (0, float(cleaned))
+        except Exception:
+            return (1, sval.lower())
+
+    if search_query:
+        q = search_query.lower()
+        rows = [
+            r for r in rows
+            if any(q in str(r.get(c, "")).lower() for c in visible_cols)
+        ]
+
+    if filter_col != "None" and filter_values:
+        selected = {v.upper() for v in filter_values}
+        rows = [
+            r for r in rows
+            if str(r.get(filter_col, "—")).upper().strip() in selected
+        ]
+
+    if sort_col != "(none)" and sort_col in cols:
+        rows = sorted(rows, key=lambda r: _coerce_sort_key(r.get(sort_col)), reverse=sort_desc)
+
+    if not rows:
+        st.caption("No rows match your current table filters.")
+        return
 
     if len(rows) > 220:
         df = pd.DataFrame(rows)
@@ -1294,7 +1908,7 @@ def ticker_tape(symbols):
     items = []
     for sym in symbols:
         try:
-            bars = broker.get_bars(sym)
+            bars = _get_bars_cached(sym)
             if len(bars) >= 2:
                 prev, last = bars[-2]["c"], bars[-1]["c"]
                 chg = ((last - prev) / prev) * 100
@@ -1312,6 +1926,16 @@ provider = config.AGENT_PROVIDER.upper() if config.USE_AGENT else "NONE"
 provider_label = {"CLAUDE":"Claude","OPENAI":"OpenAI","NONE":"No LLM"}.get(provider, provider)
 
 
+@st.cache_data(ttl=35, show_spinner=False)
+def _get_bars_cached(symbol: str, timeframe: str | None = None, lookback_days: int | None = None):
+    kwargs = {}
+    if timeframe is not None:
+        kwargs["timeframe"] = timeframe
+    if lookback_days is not None:
+        kwargs["lookback_days"] = lookback_days
+    return broker.get_bars(symbol, **kwargs)
+
+
 @st.cache_data(ttl=120)
 def _fetch_trending_tape(top_n: int = 20) -> list[dict]:
     """
@@ -1325,7 +1949,7 @@ def _fetch_trending_tape(top_n: int = 20) -> list[dict]:
     items = []
     for sym in symbols:
         try:
-            bars = broker.get_bars(sym, timeframe="1Day", lookback_days=3)
+            bars = _get_bars_cached(sym, timeframe="1Day", lookback_days=3)
             if len(bars) >= 2:
                 prev, last = float(bars[-2]["c"]), float(bars[-1]["c"])
                 chg = (last - prev) / prev * 100
@@ -1335,13 +1959,27 @@ def _fetch_trending_tape(top_n: int = 20) -> list[dict]:
     return items
 
 
+@st.fragment(run_every="30s")
+def _auto_refresh_pulse():
+    _now = time.time()
+    if "_auto_refresh_anchor_ts" not in st.session_state:
+        st.session_state["_auto_refresh_anchor_ts"] = _now
+        st.session_state["_auto_refresh_last_stamp"] = time.strftime("%H:%M:%S")
+        return
+    _last = float(st.session_state.get("_auto_refresh_anchor_ts", _now))
+    if _now - _last >= 28:
+        st.session_state["_auto_refresh_anchor_ts"] = _now
+        st.session_state["_auto_refresh_last_stamp"] = time.strftime("%H:%M:%S")
+        st.rerun()
+
+
 def build_signal_snapshot(watchlist, bar_timeframe, run_agent: bool = False):
     signal_cache = {}
     signal_rows = []
     with st.spinner("Computing signals..."):
         for symbol in watchlist:
             try:
-                bars = broker.get_bars(symbol, timeframe=bar_timeframe)
+                bars = _get_bars_cached(symbol, timeframe=bar_timeframe)
                 sig = strategy.compute_signals(bars, timeframe=bar_timeframe)
                 signal_cache[symbol] = sig
 
@@ -1419,11 +2057,9 @@ def render_screener_snapshot(watch_source, top_n):
     html_table(rows, max_height=220, table_key="screener_snapshot")
 
 
-def render_control_deck():
+def render_control_deck(sidebar_mode: bool = False):
     _saved_settings = settings_store.load()
     top_n = 10
-    _preset_options = ["Scalping", "Swing", "Backtest", "Risk", "Custom"]
-
     _ws_options = ["my_list", "trending", "most_active", "gainers", "losers", "sector", "etf"]
     _ws_saved = settings_store.get("watch_source", "my_list")
     if _ws_saved not in _ws_options:
@@ -1467,197 +2103,199 @@ def render_control_deck():
             watchlist_store.add(_sym)
     watchlist = watchlist_store.load()
 
-    section("Control Deck", "#38bdf8")
-    with st.expander("Trading controls", expanded=False):
-        p1, p2, p3 = st.columns([1.4, 1, 1.4])
-        with p1:
-            _preset_saved = settings_store.get("dashboard_preset", "Scalping")
-            _preset_idx = _preset_options.index(_preset_saved) if _preset_saved in _preset_options else 0
-            _preset_pick = st.selectbox("Layout preset", _preset_options, index=_preset_idx, key="preset_pick")
-        with p2:
-            if st.button("Apply Preset", use_container_width=True, key="preset_apply_btn"):
-                apply_dashboard_preset(_preset_pick)
-        with p3:
-            if st.button("Save Current as Custom", use_container_width=True, key="preset_save_btn"):
-                settings_store.save({
-                    "dashboard_preset": "Custom",
-                    "watch_source": watch_source,
-                    "bar_timeframe": bar_timeframe,
-                    "dry_run": dry_run_ui,
-                    "shadow_mode": shadow_mode,
-                    "allow_short": allow_short,
-                    "ui_density_profile": settings_store.get("ui_density_profile", "Pro"),
-                })
-                notify("Current control layout saved as Custom.", kind="success")
+    section("Trading controls", "#38bdf8")
+    if sidebar_mode:
+        st.markdown('<div class="workspace-subnote">Core controls first. Advanced risk and event switches below.</div>', unsafe_allow_html=True)
+        _controls_root = st.container()
+    else:
+        _controls_root = st.expander("Open controls", expanded=False)
 
-        st.caption("Work left to right: define symbols, set execution mode, then tune risk limits.")
-        universe_tab, execution_tab, risk_tab = st.tabs(["1. Universe", "2. Execution", "3. Risk & Safety"])
+    with _controls_root:
+        with st.expander("Core · Universe", expanded=True):
+            watch_source = st.selectbox(
+                "Watchlist source",
+                _ws_options,
+                index=_ws_options.index(_ws_saved),
+                format_func=lambda x: {
+                    "my_list": "My List",
+                    "trending": "Trending Now",
+                    "most_active": "Most Active",
+                    "gainers": "Top Gainers",
+                    "losers": "Top Losers",
+                    "sector": "Sector + ETF",
+                    "etf": "ETF Themes",
+                }[x],
+            )
+            if watch_source != _ws_saved:
+                settings_store.save({"watch_source": watch_source})
 
-        with universe_tab:
-            u_left, u_mid = st.columns([1.55, 1.15])
-            with u_left:
-                watch_source = st.selectbox(
-                    "Watchlist source",
-                    _ws_options,
-                    index=_ws_options.index(_ws_saved),
-                    format_func=lambda x: {
-                        "my_list": "My List",
-                        "trending": "🔥 Trending Now",
-                        "most_active": "Most Active",
-                        "gainers": "Top Gainers",
-                        "losers": "Top Losers",
-                        "sector": "Sector + ETF",
-                        "etf": "ETF Themes",
-                    }[x],
-                )
-                if watch_source != _ws_saved:
-                    settings_store.save({"watch_source": watch_source})
-
-                if watch_source == "my_list":
-                    _my_wl = watchlist_store.load()
-                    _add_col, _btn_col = st.columns([3, 1])
-                    with _add_col:
-                        _new_sym = st.text_input("Add ticker", placeholder="GOOG", key="wl_add").upper().strip()
-                    with _btn_col:
-                        if st.button("Add", use_container_width=True, key="wl_add_btn") and _new_sym:
-                            watchlist_store.add(_new_sym)
-                            notify(f"Added {_new_sym} to watchlist.", kind="success")
-                            st.rerun()
-                    if _my_wl:
-                        for _sym in _my_wl[:8]:
-                            _c1, _c2 = st.columns([4, 1])
-                            _c1.markdown(f'<div style="padding:4px 0;color:#7dd3fc;font-weight:700;font-size:0.85rem">{_sym}</div>', unsafe_allow_html=True)
-                            if _c2.button("Remove", key=f"rm_{_sym}", help=f"Remove {_sym}"):
-                                watchlist_store.remove(_sym)
-                                notify(f"Removed {_sym}.", kind="warning")
-                                st.rerun()
-                    watchlist = _my_wl
-                elif watch_source == "etf":
-                    etf_themes = st.multiselect("Themes", options=list(screener.ETF_UNIVERSE.keys()), default=["Broad Market", "Tech"])
-                    watchlist = screener.build_watchlist(watch_source, etf_themes=etf_themes or None)
-                elif watch_source == "sector":
-                    _all_sectors = sorted(screener.SECTOR_UNIVERSE.keys())
-                    _sel_sectors = st.multiselect(
-                        "Sectors",
-                        options=_all_sectors,
-                        default=["Tech", "Finance", "Broad Market"],
-                        key="sector_pick",
-                    )
-                    watchlist = screener.build_watchlist("sector", sectors=_sel_sectors or None)
-                elif watch_source == "trending":
-                    top_n = st.slider("Top N", 5, 30, 15, key="watch_topn_trending")
-                    watchlist = screener.build_watchlist("trending", top_n=top_n)
-                else:
-                    top_n = st.slider("Top N", 5, 25, 10, key="watch_topn_other")
-                    watchlist = screener.build_watchlist(watch_source, top_n=top_n)
-
-            with u_mid:
-                bar_timeframe = st.selectbox(
-                    "Chart timeframe",
-                    _tf_options,
-                    index=_tf_options.index(_tf_saved),
-                    format_func=lambda x: {"1Min": "1 Min", "5Min": "5 Min", "15Min": "15 Min", "1Hour": "1 Hour", "1Day": "1 Day"}[x],
-                )
-                if bar_timeframe != _tf_saved:
-                    settings_store.save({"bar_timeframe": bar_timeframe})
-
-                auto_refresh = st.toggle("Auto-refresh (30s)", value=auto_refresh, key="auto_refresh_toggle")
-                if st.button("Refresh Now", use_container_width=True, key="refresh_now_btn"):
+            if watch_source == "my_list":
+                _my_wl = watchlist_store.load()
+                _new_sym = st.text_input("Add ticker", placeholder="GOOG", key="wl_add").upper().strip()
+                if st.button("Add symbol", use_container_width=True, key="wl_add_btn") and _new_sym:
+                    watchlist_store.add(_new_sym)
+                    notify(f"Added {_new_sym} to watchlist.", kind="success")
                     st.rerun()
-
-                run_geo = st.toggle("Geopolitical events", value=run_geo, key="run_geo_toggle")
-                run_earnings = st.toggle("Earnings events", value=run_earnings, key="run_earnings_toggle")
-                run_macro = st.toggle("Macro events", value=run_macro, key="run_macro_toggle")
-                settings_store.save({"run_geo": run_geo, "run_earnings": run_earnings, "run_macro": run_macro})
-
-        with execution_tab:
-            e_left, e_mid = st.columns([1.1, 1.3])
-            with e_left:
-                dry_run_ui = st.toggle("Dry Run", value=dry_run_ui, key="dry_run_toggle")
-                shadow_mode = st.toggle("Shadow Mode", value=shadow_mode, key="shadow_mode_toggle")
-                allow_short = st.toggle("Allow Short Selling", value=allow_short, key="allow_short_toggle")
-                settings_store.save({
-                    "dry_run": dry_run_ui,
-                    "shadow_mode": shadow_mode,
-                    "allow_short": allow_short,
-                })
-
-                if st.button("Close All Positions", use_container_width=True, key="close_all_positions_btn"):
-                    try:
-                        positions = broker.get_positions()
-                        for p in positions:
-                            broker.close_position(p["symbol"])
-                        notify(f"Closed {len(positions)} position(s).", kind="success")
+                if _my_wl:
+                    rm_sym = st.selectbox("Remove ticker", _my_wl, key="wl_remove_pick")
+                    if st.button("Remove symbol", use_container_width=True, key="wl_remove_btn"):
+                        watchlist_store.remove(rm_sym)
+                        notify(f"Removed {rm_sym}.", kind="warning")
                         st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
-
-            with e_mid:
-                manual_symbol = st.selectbox(
-                    "Manual symbol",
-                    watchlist if watchlist else config.WATCHLIST,
-                    key="manual_symbol_ctrl",
+                    st.caption("Current: " + ", ".join(_my_wl[:12]))
+                watchlist = _my_wl
+            elif watch_source == "etf":
+                etf_themes = st.multiselect(
+                    "Themes",
+                    options=list(screener.ETF_UNIVERSE.keys()),
+                    default=["Broad Market", "Tech"],
+                    key="etf_themes_pick",
                 )
-                manual_qty = st.number_input("Manual quantity", min_value=1, value=1, step=1, key="manual_qty_ctrl")
-                _buy_col, _sell_col = st.columns(2)
-                with _buy_col:
-                    if st.button("BUY", use_container_width=True, type="primary", key="manual_buy_btn"):
-                        try:
-                            if shadow_mode:
-                                _bars = broker.get_bars(manual_symbol)
-                                _px = float(_bars[-1]["c"]) if _bars else 0.0
-                                shadow_book.record_intent(manual_symbol, "buy", manual_qty, _px, "manual order", 0)
-                                shadow_book.open_position(manual_symbol, "long", manual_qty, _px, "manual order", 0)
-                                notify("Shadow BUY recorded.", kind="success")
-                            elif dry_run_ui:
-                                notify("Dry run enabled: no order placed.", kind="warning")
-                            else:
-                                order = broker.place_market_order(manual_symbol, manual_qty, "buy")
-                                notify(f"Order placed #{order['id'][:8]}.", kind="success")
-                        except Exception as e:
-                            st.error(str(e))
-                with _sell_col:
-                    if st.button("SELL", use_container_width=True, key="manual_sell_btn"):
-                        try:
-                            if shadow_mode:
-                                _bars = broker.get_bars(manual_symbol)
-                                _pos = shadow_book.get_position(manual_symbol)
-                                _px = float(_bars[-1]["c"]) if _bars else float(_pos["entry_price"]) if _pos else 0.0
-                                trade = shadow_book.close_position(manual_symbol, _px, reason="manual close")
-                                notify("Shadow position closed." if trade else "No shadow position to close.", kind="success" if trade else "warning")
-                            elif dry_run_ui:
-                                notify("Dry run enabled: no order placed.", kind="warning")
-                            else:
-                                broker.close_position(manual_symbol)
-                                notify("Position close submitted.", kind="success")
-                        except Exception as e:
-                            st.error(str(e))
-
-        with risk_tab:
-            r_left, r_mid, r_right = st.columns([1.25, 1.05, 1.0])
-            with r_left:
-                sl_pct = st.slider("Stop Loss %", 0, 20, _sl_default, key="risk_sl_pct") / 100
-                tp_pct = st.slider("Take Profit %", 0, 50, _tp_default, key="risk_tp_pct") / 100
-                daily_loss_stop_pct = st.slider("Daily Loss Stop %", 0, 20, _daily_stop_default, key="risk_daily_loss_stop") / 100
-                max_sector_exposure_pct = st.slider("Sector Cap %", 0, 100, _sector_cap_default, key="risk_sector_cap") / 100
-            with r_mid:
-                enable_correlation_cap = st.toggle("Enable Correlation Cap", value=_corr_cap_default, key="risk_corr_cap")
-                max_correlation = st.slider("Max Correlation", 0.50, 0.99, _max_corr_default, 0.01, key="risk_max_corr")
-                max_correlated_positions = st.number_input(
-                    "Max Correlated Holdings",
-                    min_value=1,
-                    max_value=20,
-                    value=_max_corr_positions_default,
-                    step=1,
-                    key="risk_max_corr_holdings",
+                watchlist = screener.build_watchlist(watch_source, etf_themes=etf_themes or None)
+            elif watch_source == "sector":
+                _all_sectors = sorted(screener.SECTOR_UNIVERSE.keys())
+                _sel_sectors = st.multiselect(
+                    "Sectors",
+                    options=_all_sectors,
+                    default=["Tech", "Finance", "Broad Market"],
+                    key="sector_pick",
                 )
-                correlation_lookback_days = st.slider("Correlation Lookback", 20, 365, _corr_lookback_default, 5, key="risk_corr_lookback")
-            with r_right:
-                if st.button("Reset Risk Halt", use_container_width=True, key="risk_reset_halt_btn"):
-                    risk.reset_halts(reset_peak=False)
-                    notify("Risk halts reset.", kind="success")
+                watchlist = screener.build_watchlist("sector", sectors=_sel_sectors or None)
+            elif watch_source == "trending":
+                top_n = st.slider("Top N", 5, 30, 15, key="watch_topn_trending")
+                watchlist = screener.build_watchlist("trending", top_n=top_n)
+            else:
+                top_n = st.slider("Top N", 5, 25, 10, key="watch_topn_other")
+                watchlist = screener.build_watchlist(watch_source, top_n=top_n)
+
+            bar_timeframe = st.selectbox(
+                "Chart timeframe",
+                _tf_options,
+                index=_tf_options.index(_tf_saved),
+                format_func=lambda x: {"1Min": "1 Min", "5Min": "5 Min", "15Min": "15 Min", "1Hour": "1 Hour", "1Day": "1 Day"}[x],
+            )
+            if bar_timeframe != _tf_saved:
+                settings_store.save({"bar_timeframe": bar_timeframe})
+
+            auto_refresh = st.toggle("Auto-refresh (30s)", value=auto_refresh, key="auto_refresh_toggle")
+            if st.button("Refresh now", use_container_width=True, key="refresh_now_btn"):
+                st.rerun()
+
+        with st.expander("Core · Execution", expanded=True):
+            dry_run_ui = st.toggle("Dry Run", value=dry_run_ui, key="dry_run_toggle")
+            shadow_mode = st.toggle("Shadow Mode", value=shadow_mode, key="shadow_mode_toggle")
+            allow_short = st.toggle("Allow Short Selling", value=allow_short, key="allow_short_toggle")
+            settings_store.save({
+                "dry_run": dry_run_ui,
+                "shadow_mode": shadow_mode,
+                "allow_short": allow_short,
+            })
+
+            manual_symbol = st.selectbox(
+                "Manual symbol",
+                watchlist if watchlist else config.WATCHLIST,
+                key="manual_symbol_ctrl",
+            )
+            manual_qty = st.number_input("Manual quantity", min_value=1, value=1, step=1, key="manual_qty_ctrl")
+            _exec_mode = "Shadow" if shadow_mode else ("Dry Run" if dry_run_ui else "Live")
+            st.caption(f"Order preview: {manual_qty} × {manual_symbol} · Mode: {_exec_mode}")
+            confirm_manual_orders = st.checkbox(
+                "Enable manual order buttons",
+                value=False,
+                key="manual_order_confirm",
+                help="Prevents accidental clicks when changing controls.",
+            )
+
+            if st.button(
+                "Buy market",
+                use_container_width=True,
+                type="primary",
+                key="manual_buy_btn",
+                disabled=not confirm_manual_orders,
+            ):
+                try:
+                    if shadow_mode:
+                        _bars = broker.get_bars(manual_symbol)
+                        _px = float(_bars[-1]["c"]) if _bars else 0.0
+                        shadow_book.record_intent(manual_symbol, "buy", manual_qty, _px, "manual order", 0)
+                        shadow_book.open_position(manual_symbol, "long", manual_qty, _px, "manual order", 0)
+                        notify("Shadow BUY recorded.", kind="success")
+                    elif dry_run_ui:
+                        notify("Dry run enabled: no order placed.", kind="warning")
+                    else:
+                        order = broker.place_market_order(manual_symbol, manual_qty, "buy")
+                        notify(f"Order placed #{order['id'][:8]}.", kind="success")
+                except Exception as e:
+                    st.error(str(e))
+
+            if st.button(
+                "Sell / close",
+                use_container_width=True,
+                key="manual_sell_btn",
+                disabled=not confirm_manual_orders,
+            ):
+                try:
+                    if shadow_mode:
+                        _bars = broker.get_bars(manual_symbol)
+                        _pos = shadow_book.get_position(manual_symbol)
+                        _px = float(_bars[-1]["c"]) if _bars else float(_pos["entry_price"]) if _pos else 0.0
+                        trade = shadow_book.close_position(manual_symbol, _px, reason="manual close")
+                        notify("Shadow position closed." if trade else "No shadow position to close.", kind="success" if trade else "warning")
+                    elif dry_run_ui:
+                        notify("Dry run enabled: no order placed.", kind="warning")
+                    else:
+                        broker.close_position(manual_symbol)
+                        notify("Position close submitted.", kind="success")
+                except Exception as e:
+                    st.error(str(e))
+
+            confirm_close_all = st.checkbox(
+                "I understand this will close all open positions",
+                value=False,
+                key="confirm_close_all_positions",
+            )
+            if st.button(
+                "Close all positions",
+                use_container_width=True,
+                key="close_all_positions_btn",
+                disabled=not confirm_close_all,
+            ):
+                try:
+                    positions = broker.get_positions()
+                    for p in positions:
+                        broker.close_position(p["symbol"])
+                    notify(f"Closed {len(positions)} position(s).", kind="success")
                     st.rerun()
-                st.caption(f"Agent: {provider_label}")
+                except Exception as e:
+                    st.error(str(e))
+
+        with st.expander("Advanced · Risk & Events", expanded=False):
+            run_geo = st.toggle("Geopolitical events", value=run_geo, key="run_geo_toggle")
+            run_earnings = st.toggle("Earnings events", value=run_earnings, key="run_earnings_toggle")
+            run_macro = st.toggle("Macro events", value=run_macro, key="run_macro_toggle")
+            settings_store.save({"run_geo": run_geo, "run_earnings": run_earnings, "run_macro": run_macro})
+
+            sl_pct = st.slider("Stop Loss %", 0, 20, _sl_default, key="risk_sl_pct") / 100
+            tp_pct = st.slider("Take Profit %", 0, 50, _tp_default, key="risk_tp_pct") / 100
+            daily_loss_stop_pct = st.slider("Daily Loss Stop %", 0, 20, _daily_stop_default, key="risk_daily_loss_stop") / 100
+            max_sector_exposure_pct = st.slider("Sector Cap %", 0, 100, _sector_cap_default, key="risk_sector_cap") / 100
+            enable_correlation_cap = st.toggle("Enable Correlation Cap", value=_corr_cap_default, key="risk_corr_cap")
+            max_correlation = st.slider("Max Correlation", 0.50, 0.99, _max_corr_default, 0.01, key="risk_max_corr")
+            max_correlated_positions = st.number_input(
+                "Max Correlated Holdings",
+                min_value=1,
+                max_value=20,
+                value=_max_corr_positions_default,
+                step=1,
+                key="risk_max_corr_holdings",
+            )
+            correlation_lookback_days = st.slider("Correlation Lookback", 20, 365, _corr_lookback_default, 5, key="risk_corr_lookback")
+
+            if st.button("Reset risk halt", use_container_width=True, key="risk_reset_halt_btn"):
+                risk.reset_halts(reset_peak=False)
+                notify("Risk halts reset.", kind="success")
+                st.rerun()
+            st.caption(f"Agent: {provider_label}")
 
         _risk_settings_payload = {
             "sl_pct": sl_pct,
@@ -1723,7 +2361,8 @@ st.markdown(f"""
 # ── Trending ticker tape (always live, independent of watchlist selection) ──────
 _tape_items = _fetch_trending_tape(20)
 
-control_state = render_control_deck()
+with st.sidebar:
+    control_state = render_control_deck(sidebar_mode=True)
 auto_refresh = control_state["auto_refresh"]
 watch_source = control_state["watch_source"]
 watchlist = control_state["watchlist"]
@@ -1776,18 +2415,17 @@ try:
     day_state = risk.update_daily_loss_guard(account)
     peak = dd_state["peak_equity"]
     drawdown = dd_state["drawdown_pct"] * 100
+    _post_snapshot_alerts: list[tuple[str, str]] = []
 
     if dd_state["halted"]:
-        alert("danger", f"MAX DRAWDOWN HALT ACTIVE — {drawdown:.2f}% from peak ${peak:,.2f}.")
+        _post_snapshot_alerts.append(("danger", f"MAX DRAWDOWN HALT ACTIVE — {drawdown:.2f}% from peak ${peak:,.2f}."))
     if day_state["halted"]:
-        alert("danger", f"DAILY LOSS STOP ACTIVE — {day_state['daily_loss_pct']*100:.2f}% vs open.")
+        _post_snapshot_alerts.append(("danger", f"DAILY LOSS STOP ACTIVE — {day_state['daily_loss_pct']*100:.2f}% vs open."))
 
     if config.PAPER_TRADING and account["equity"] < 1000:
-        st.warning(
-            "⚠️ Paper account equity is very low. "
-            "To reset to $100,000: go to **alpaca.markets → Paper Account → Reset** "
-            "or close all positions below.",
-            icon=None,
+        _post_snapshot_alerts.append(
+            ("warning_native",
+             "⚠️ Paper account equity is very low. To reset to $100,000: go to **alpaca.markets → Paper Account → Reset** or close all positions below.")
         )
 
 except Exception as e:
@@ -1854,6 +2492,11 @@ _portfolio_snapshot_chips = [
     ("Execution", _execution_state),
 ]
 render_market_snapshot(_context_snapshot_chips, _health_snapshot_items, _portfolio_snapshot_chips, _tape_items)
+for _kind, _text in _post_snapshot_alerts:
+    if _kind == "warning_native":
+        st.warning(_text, icon=None)
+    else:
+        alert(_kind, _text)
 
 # ── Workspace ──────────────────────────────────────────────────────────────────
 section("Workspace", "#22d3ee")
@@ -1881,34 +2524,15 @@ with _ws_focus_col:
 active_panel = _PANEL_BY_ID[active_panel_id]
 if _saved_panel_label != active_panel:
     settings_store.save({"dashboard_panel": active_panel})
-
-st.markdown('<div class="workspace-subnote">Step 3: tune display preferences only when needed.</div>', unsafe_allow_html=True)
-with st.expander("View preferences", expanded=False):
-    _tool_l, _tool_m, _tool_n = st.columns(3)
-    with _tool_l:
-        _density_saved = settings_store.get("table_density", "Comfortable")
-        _density_idx = 0 if _density_saved == "Compact" else 1
-        _density_pick = st.selectbox("Table view", ["Compact", "Comfortable"], index=_density_idx, key="workspace_table_density")
-        if _density_pick != _density_saved:
-            settings_store.save({"table_density": _density_pick})
-            st.rerun()
-    with _tool_m:
-        _layout_saved = settings_store.get("chart_layout", "Single")
-        _layout_opts = ["Single", "Split", "Dual"]
-        _layout_idx = _layout_opts.index(_layout_saved) if _layout_saved in _layout_opts else 0
-        _layout_pick = st.selectbox("Chart canvas", _layout_opts, index=_layout_idx, key="workspace_chart_layout")
-        if _layout_pick != _layout_saved:
-            settings_store.save({"chart_layout": _layout_pick})
-            st.rerun()
-    with _tool_n:
-        _ui_saved = settings_store.get("ui_density_profile", "Pro")
-        _ui_opts = ["Pro", "Airy"]
-        _ui_idx = _ui_opts.index(_ui_saved) if _ui_saved in _ui_opts else 0
-        _ui_pick = st.selectbox("Interface style", _ui_opts, index=_ui_idx, key="workspace_ui_density")
-        if _ui_pick != _ui_saved:
-            settings_store.save({"ui_density_profile": _ui_pick})
-            st.rerun()
-st.markdown(f'<div class="workspace-active-chip">Active panel <b>{active_panel}</b></div>', unsafe_allow_html=True)
+render_context_rail(
+    active_panel_id,
+    _market_status_text,
+    _execution_state,
+    watch_source,
+    watchlist,
+    bar_timeframe,
+)
+render_command_bar(active_panel_id)
 
 
 def render_overview_panel():
@@ -1916,19 +2540,12 @@ def render_overview_panel():
         alert("neutral", "No symbols in watchlist.")
         return
 
-    module_stamp("Overview")
     section("Overview Desk", "#14b8a6")
     render_panel_quick_actions("overview")
     render_screener_snapshot(watch_source, top_n)
-    _ov_left, _ov_right = st.columns([3, 1])
-    with _ov_right:
-        run_agent_scan = st.toggle(
-            f"Agent scan ({provider_label})",
-            value=False,
-            key="ov_agent_scan",
-            help="Run LLM approval check on every BUY/SELL signal. Slower but fills the Agent column.",
-            disabled=not config.USE_AGENT,
-        )
+    if "ov_agent_scan" not in st.session_state:
+        st.session_state["ov_agent_scan"] = False
+    run_agent_scan = bool(st.session_state.get("ov_agent_scan", False))
     _ov_skeleton = loading_skeleton(4)
     signal_cache, signal_rows = build_signal_snapshot(watchlist, bar_timeframe, run_agent=run_agent_scan)
     _ov_skeleton.empty()
@@ -1936,14 +2553,26 @@ def render_overview_panel():
         alert("neutral", "No symbols in watchlist.")
         return
 
+    _ranked_syms = sorted([r for r in signal_rows if r["Signal"] != "ERROR"], key=lambda r: abs(r["Score"]), reverse=True)
+    _top_focus = _ranked_syms[0]["Symbol"] if _ranked_syms else watchlist[0]
+
     _buys = sum(1 for r in signal_rows if r["Signal"] == "BUY")
     _sells = sum(1 for r in signal_rows if r["Signal"] == "SELL")
     _holds = sum(1 for r in signal_rows if r["Signal"] == "HOLD")
-    focus_chips([
-        ("Signals", f"{_buys} buy · {_sells} sell · {_holds} hold"),
-        ("Universe", f"{len(signal_rows)} symbols"),
-        ("Focus", sorted(signal_rows, key=lambda r: abs(r['Score']), reverse=True)[0]["Symbol"]),
-    ])
+    _sig_left, _sig_right = st.columns([3.55, 1.15], gap="small")
+    with _sig_left:
+        focus_chips([
+            ("Signals", f"{_buys} buy · {_sells} sell · {_holds} hold"),
+            ("Universe", f"{len(signal_rows)} symbols"),
+            ("Focus", _top_focus),
+        ])
+    with _sig_right:
+        st.toggle(
+            f"Agent scan ({provider_label})",
+            key="ov_agent_scan",
+            help="Run LLM approval check on every BUY/SELL signal. Slower but fills the Agent column.",
+            disabled=not config.USE_AGENT,
+        )
 
     _overview_board_height = 620
     _overview_chart_height = 340
@@ -1952,23 +2581,29 @@ def render_overview_panel():
     left, right = st.columns([1.05, 1.35], gap="large")
     with left:
         section("Signal Board", "#34d399")
+        _focus_candidates = [r["Symbol"] for r in _ranked_syms] if _ranked_syms else list(watchlist)
+        if "overview_focus_pick" not in st.session_state or st.session_state["overview_focus_pick"] not in _focus_candidates:
+            st.session_state["overview_focus_pick"] = _top_focus
+        st.selectbox(
+            "Focus symbol from board",
+            _focus_candidates,
+            key="overview_focus_pick",
+            on_change=_sync_overview_focus_symbol,
+        )
         html_table(signal_rows, max_height=_overview_board_height, table_key="overview_signal_board")
 
     with right:
         section("Focused Symbol", "#38bdf8")
-        _sorted_syms = sorted([r for r in signal_rows if r["Signal"] != "ERROR"], key=lambda r: abs(r["Score"]), reverse=True)
-        _default_sym = _sorted_syms[0]["Symbol"] if _sorted_syms else watchlist[0]
-        _sym_index = watchlist.index(_default_sym) if _default_sym in watchlist else 0
+        if "detail_sym" not in st.session_state or st.session_state["detail_sym"] not in watchlist:
+            st.session_state["detail_sym"] = _top_focus
         detail_sym = st.selectbox(
-            "Select symbol for details",
+            "Focused symbol",
             watchlist,
-            index=_sym_index,
             key="detail_sym",
-            label_visibility="collapsed",
         )
 
         try:
-            _bars = broker.get_bars(detail_sym, timeframe=bar_timeframe)
+            _bars = _get_bars_cached(detail_sym, timeframe=bar_timeframe)
             _sig = signal_cache.get(detail_sym) or strategy.compute_signals(_bars, timeframe=bar_timeframe)
             _rsi_val = _sig.get("rsi")
             _price_val = _sig.get("price")
@@ -2067,11 +2702,11 @@ def render_charts_panel():
     _skeleton = loading_skeleton(5)
     with st.spinner(f"Loading {chart_symbol} bars..."):
         try:
-            bars = broker.get_bars(chart_symbol, timeframe=chart_tf)
+            bars = _get_bars_cached(chart_symbol, timeframe=chart_tf)
             sig = strategy.compute_signals(bars, timeframe=chart_tf)
             fig = charts.candlestick(bars, chart_symbol, sig)
             if overlay_compare and overlay_symbol and overlay_symbol != chart_symbol:
-                _overlay_bars = broker.get_bars(overlay_symbol, timeframe=chart_tf)
+                _overlay_bars = _get_bars_cached(overlay_symbol, timeframe=chart_tf)
                 if _overlay_bars:
                     _base = float(_overlay_bars[0]["c"]) if float(_overlay_bars[0]["c"]) != 0 else 1.0
                     _x = [b["t"] for b in _overlay_bars]
@@ -2113,7 +2748,7 @@ def render_charts_panel():
                 with c_left:
                     st.plotly_chart(fig, use_container_width=True)
                 with c_right:
-                    _cmp_bars = broker.get_bars(compare_symbol, timeframe=chart_tf)
+                    _cmp_bars = _get_bars_cached(compare_symbol, timeframe=chart_tf)
                     _cmp_sig = strategy.compute_signals(_cmp_bars, timeframe=chart_tf)
                     _cmp_fig = charts.candlestick(_cmp_bars, compare_symbol, _cmp_sig)
                     _cmp_fig.update_layout(height=440, margin=dict(l=16, r=16, t=40, b=18))
@@ -2148,7 +2783,7 @@ def render_positions_panel():
             positions = []
             for p in shadow_book.summary()["open_positions"]:
                 _entry = float(p["entry_price"])
-                _bars = broker.get_bars(p["symbol"])
+                _bars = _get_bars_cached(p["symbol"])
                 _current = float(_bars[-1]["c"]) if _bars else _entry
                 _qty = float(p["qty"])
                 _side = p.get("side", "long")
@@ -2262,7 +2897,7 @@ def render_events_panel():
     render_panel_quick_actions("events")
     ev_c1, ev_c2 = st.columns([2, 1])
     with ev_c1:
-        event_symbol = st.selectbox("Symbol", watchlist, key="event_sym", label_visibility="collapsed")
+        event_symbol = st.selectbox("Symbol", watchlist, key="event_sym")
     with ev_c2:
         ev_news_n = st.slider("Headlines", 5, 20, 10, key="ev_news_n")
 
@@ -2296,7 +2931,7 @@ def render_events_panel():
             with st.spinner(f"{provider_label} scoring headlines..."):
                 ev_result = events.get_event_score(event_symbol, run_earnings=run_earnings, run_geo=run_geo, run_macro=run_macro)
             try:
-                _event_bars = broker.get_bars(event_symbol, timeframe=bar_timeframe)
+                _event_bars = _get_bars_cached(event_symbol, timeframe=bar_timeframe)
                 quant = strategy.compute_signals(_event_bars, timeframe=bar_timeframe)
             except Exception:
                 quant = {"score": 0, "reason": "no quant data", "signal": "hold", "rsi": None, "price": None, "atr": None, "event_score": 0, "event_reasons": []}
@@ -2324,18 +2959,19 @@ def render_backtest_panel():
     render_panel_quick_actions("backtest")
     bl, bm, bn, br = st.columns([2, 1, 1, 1])
     with bl:
-        bt_symbol = st.selectbox("Symbol", watchlist, key="bt_sym", label_visibility="collapsed")
+        bt_symbol = st.selectbox("Symbol", watchlist, key="bt_sym")
     with bm:
-        bt_tf = st.selectbox("Timeframe", ["1Min", "5Min", "15Min", "1Hour", "1Day"], index=4, key="bt_tf", label_visibility="collapsed")
+        bt_tf = st.selectbox("Timeframe", ["1Min", "5Min", "15Min", "1Hour", "1Day"], index=4, key="bt_tf")
     with bn:
         _bt_lookback_opts = {"5d": 5, "20d": 20, "60d": 60, "180d": 180, "1y": 365, "2y": 730}
         _bt_min_lookback = {"1Min": 20, "5Min": 20, "15Min": 60, "1Hour": 180, "1Day": 365}
         _bt_lb_keys = list(_bt_lookback_opts.keys())
         _bt_min_days = _bt_min_lookback.get(bt_tf, 20)
         _bt_valid_keys = [k for k, v in _bt_lookback_opts.items() if v >= _bt_min_days]
-        bt_lookback_label = st.selectbox("Lookback", _bt_valid_keys, key="bt_lookback2", label_visibility="collapsed")
+        bt_lookback_label = st.selectbox("Lookback", _bt_valid_keys, key="bt_lookback2")
         bt_lookback_days = _bt_lookback_opts[bt_lookback_label]
     with br:
+        control_action_label("Run")
         run_bt = st.button("Run Backtest", type="primary", use_container_width=True)
 
     if run_bt:
@@ -2369,10 +3005,11 @@ def render_backtest_panel():
         st.caption("Splits data into folds and checks out-of-sample performance.")
         wf_c1, wf_c2, wf_c3 = st.columns([2, 1, 1])
         with wf_c1:
-            wf_sym = st.selectbox("Symbol", watchlist, key="wf_sym", label_visibility="collapsed")
+            wf_sym = st.selectbox("Symbol", watchlist, key="wf_sym")
         with wf_c2:
-            wf_tf = st.selectbox("Timeframe", ["1Day", "1Hour"], key="wf_tf", label_visibility="collapsed")
+            wf_tf = st.selectbox("Timeframe", ["1Day", "1Hour"], key="wf_tf")
         with wf_c3:
+            control_action_label("Run")
             run_wf = st.button("Walk-Forward", type="primary", use_container_width=True)
         if run_wf:
             with st.spinner(f"Running 5-fold walk-forward on {wf_sym}..."):
@@ -2391,10 +3028,11 @@ def render_backtest_panel():
         st.caption("Training window grows with each fold — mirrors live deployment more realistically than fixed folds.")
         ewf_c1, ewf_c2, ewf_c3 = st.columns([2, 1, 1])
         with ewf_c1:
-            ewf_sym = st.selectbox("Symbol", watchlist, key="ewf_sym", label_visibility="collapsed")
+            ewf_sym = st.selectbox("Symbol", watchlist, key="ewf_sym")
         with ewf_c2:
-            ewf_tf = st.selectbox("Timeframe", ["1Day", "1Hour"], key="ewf_tf", label_visibility="collapsed")
+            ewf_tf = st.selectbox("Timeframe", ["1Day", "1Hour"], key="ewf_tf")
         with ewf_c3:
+            control_action_label("Run")
             run_ewf = st.button("Expanding WF", type="primary", use_container_width=True)
         if run_ewf:
             with st.spinner(f"Running expanding walk-forward on {ewf_sym}..."):
@@ -2417,17 +3055,18 @@ def render_backtest_panel():
         st.caption("Searches threshold, stop loss, and take profit combinations ranked by Sharpe ratio.")
         opt_c1, opt_c2, opt_c3, opt_c4 = st.columns([2, 1, 1, 1])
         with opt_c1:
-            opt_sym = st.selectbox("Symbol", watchlist, key="opt_sym", label_visibility="collapsed")
+            opt_sym = st.selectbox("Symbol", watchlist, key="opt_sym")
         with opt_c2:
-            opt_tf = st.selectbox("Timeframe", ["1Min", "5Min", "15Min", "1Hour", "1Day"], index=4, key="opt_tf2", label_visibility="collapsed")
+            opt_tf = st.selectbox("Timeframe", ["1Min", "5Min", "15Min", "1Hour", "1Day"], index=4, key="opt_tf2")
         with opt_c3:
             _opt_lb_opts = {"5d": 5, "20d": 20, "60d": 60, "180d": 180, "1y": 365, "2y": 730}
             _opt_min_lookback = {"1Min": 20, "5Min": 20, "15Min": 60, "1Hour": 180, "1Day": 365}
             _opt_min_days = _opt_min_lookback.get(opt_tf, 20)
             _opt_valid_keys = [k for k, v in _opt_lb_opts.items() if v >= _opt_min_days]
-            opt_lb_label = st.selectbox("Lookback", _opt_valid_keys, key="opt_lb2", label_visibility="collapsed")
+            opt_lb_label = st.selectbox("Lookback", _opt_valid_keys, key="opt_lb2")
             opt_lb_days = _opt_lb_opts[opt_lb_label]
         with opt_c4:
+            control_action_label("Run")
             run_opt = st.button("Optimise", type="primary", use_container_width=True)
         if run_opt:
             with st.spinner(f"Grid searching {opt_sym} · {opt_tf} · {opt_lb_label}..."):
@@ -2462,7 +3101,7 @@ def render_watchlist_panel():
     with wl2:
         st.markdown("**Remove symbol**")
         if _wl_all:
-            rm_sym = st.selectbox("Symbol to remove", _wl_all, label_visibility="collapsed")
+            rm_sym = st.selectbox("Symbol to remove", _wl_all)
             if st.button("Remove Symbol", use_container_width=True):
                 watchlist_store.remove(rm_sym)
                 st.success(f"Removed {rm_sym}")
@@ -2589,7 +3228,7 @@ def render_log_panel():
     try:
         log_lc, log_rc = st.columns([3, 1])
         with log_lc:
-            log_filter = st.selectbox("Level", ["ALL", "ERROR", "WARNING", "INFO"], label_visibility="collapsed", key="log_level")
+            log_filter = st.selectbox("Log level", ["ALL", "ERROR", "WARNING", "INFO"], key="log_level")
         with log_rc:
             log_lines = st.slider("Lines", 20, 200, 60, key="log_lines_n")
 
@@ -2641,5 +3280,8 @@ elif active_panel == "Log":
 
 # ── Auto-refresh ───────────────────────────────────────────────────────────────
 if auto_refresh:
-    time.sleep(30)
-    st.rerun()
+    _auto_refresh_pulse()
+    _last_refresh_stamp = st.session_state.get("_auto_refresh_last_stamp", "—")
+    st.caption(f"Auto-refresh on · every 30s · last cycle {_last_refresh_stamp}")
+else:
+    st.session_state.pop("_auto_refresh_anchor_ts", None)

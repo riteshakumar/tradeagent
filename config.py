@@ -99,7 +99,7 @@ TAKE_PROFIT_PCT = _env_float("TAKE_PROFIT_PCT", 0.10, minimum=0.0, maximum=10.0)
 
 # ATR-based dynamic SL multiplier for backtesting (adapts to volatility per timeframe)
 # SL = sl_atr_mult × ATR / price; TP disabled (0) — trailing stop + signal exits handle profit taking
-SL_ATR_MULT = _env_float("SL_ATR_MULT", 1.0, minimum=0.1, maximum=10.0)
+SL_ATR_MULT = _env_float("SL_ATR_MULT", 2.0, minimum=0.1, maximum=10.0)
 TP_ATR_MULT = _env_float("TP_ATR_MULT", 0.0, minimum=0.0, maximum=20.0)
 
 # Trading params
@@ -109,7 +109,7 @@ WATCHLIST = _env_list("WATCHLIST", ["AAPL", "MSFT", "NVDA", "TSLA"])
 WATCHLIST_SOURCE = os.getenv("WATCHLIST_SOURCE", "static").strip().lower() or "static"
 WATCHLIST_SECTORS = _env_list("WATCHLIST_SECTORS", [])   # e.g. "Tech,Finance"
 WATCHLIST_TOP_N   = _env_int("WATCHLIST_TOP_N", 10, minimum=3, maximum=50)
-MAX_POSITION_PCT = _env_float("MAX_POSITION_PCT", 0.10, minimum=0.0, maximum=1.0)
+MAX_POSITION_PCT = _env_float("MAX_POSITION_PCT", 0.25, minimum=0.0, maximum=1.0)
 RISK_PER_TRADE_PCT = _env_float("RISK_PER_TRADE_PCT", 0.01, minimum=0.0, maximum=1.0)
 MAX_DRAWDOWN_PCT = _env_float("MAX_DRAWDOWN_PCT", 0.10, minimum=0.0, maximum=1.0)
 LOOP_INTERVAL_SEC = _env_int("LOOP_INTERVAL_SEC", 300, minimum=5)
@@ -131,7 +131,7 @@ SHADOW_MODE = _env_bool("SHADOW_MODE", False)
 AGENT_CACHE_TTL_SEC = _env_int("AGENT_CACHE_TTL_SEC", 300, minimum=0)
 
 # Short selling
-ALLOW_SHORT = _env_bool("ALLOW_SHORT", False)
+ALLOW_SHORT = _env_bool("ALLOW_SHORT", True)
 
 # Portfolio risk caps
 MAX_SECTOR_EXPOSURE_PCT = _env_float("MAX_SECTOR_EXPOSURE_PCT", 0.35, minimum=0.0, maximum=1.0)

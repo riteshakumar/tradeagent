@@ -31,8 +31,8 @@ _PERIODS_PER_DAY = {
     "1Day": 1.0,
 }
 _TIMEFRAME_SIGNAL_THRESHOLD_OFFSET = {
-    "1Min": 2,
-    "5Min": 1,
+    "1Min": 1,
+    "5Min": 0,   # ATR-based SL + 2R partial target replaces threshold as noise filter
     "15Min": 0,
     "1Hour": 0,
     "1Day": -1,

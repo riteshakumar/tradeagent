@@ -21,10 +21,10 @@ import strategy
 
 _BT_LOOKBACK = {
     "1Min": 5,
-    "5Min": 20,
-    "15Min": 60,
-    "1Hour": 180,
-    "1Day": 730,
+    "5Min": 60,   # ~3 months: enough trades, avoids multi-year regime drift
+    "15Min": 90,  # ~4.5 months
+    "1Hour": 180, # ~9 months
+    "1Day": 365,  # 1 year
 }
 
 _ANNUALIZATION_PERIODS = {
@@ -298,7 +298,8 @@ def _backtest_pre_trade_checks(
     qty = risk.compute_qty(price, account, atr=atr, realized_vol=realized_vol)
     if qty <= 0:
         return False, "qty resolved to zero", 0.0
-    if not risk.check_buying_power(price, qty, account):
+    # Shorts receive cash at entry (proceeds) — no upfront cost, skip buying_power check.
+    if side != "sell" and not risk.check_buying_power(price, qty, account):
         return False, "insufficient buying power", 0.0
 
     ok, reason = risk.check_sector_exposure(symbol, price, qty, positions, account)
@@ -313,7 +314,6 @@ def _backtest_pre_trade_checks(
     if not ok:
         return False, reason, 0.0
 
-    del side
     return True, "ok", float(qty)
 
 
@@ -861,8 +861,8 @@ def _apply_historical_signal_filters(
     )
     if signal == "buy" and higher_tf_signal == "sell":
         return "hold"
-    if signal == "sell" and higher_tf_signal == "buy":
-        return "hold"
+    # Do NOT block sell signals when higher-TF is bullish — shorts are already gated
+    # by score threshold and SPY bear penalty. Blocking here causes 0 short trades.
 
     # Peer consensus: daily peer signals must not gate intraday entries —
     # AMD/AVGO daily trend has no bearing on whether a 5Min NVDA scalp is valid.
@@ -913,9 +913,13 @@ def _simulate(
     partial_done = False
     entry_date = ""
     entry_fee_remaining = 0.0
-    active_stop_pct = 0.0   # set at entry from ATR
+    active_stop_pct = 0.0   # set at entry from ATR; widens to trail_stop_pct after partial
     active_tp_pct = 0.0     # set at entry from ATR
-    breakeven_locked = False  # True once price moves +1×ATR in favour; floors stop at entry
+    initial_stop_pct = 0.0  # protective SL at entry (never changes)
+    trail_stop_pct = 0.0    # wider trailing stop (3-6× initial) applied after partial profit fires
+    breakeven_locked = False  # True once price moves +1×SL in favour; floors stop at entry
+    bars_held = 0            # bars since entry; SL suppressed for MIN_HOLD_BARS to avoid noise-stops
+    _MIN_HOLD_BARS = 3       # don't stop-out until held at least 3 bars (avoids instant whipsaw)
     stop_cooldown = 0
     exit_hold_count = 0
     _STOP_COOLDOWN_BARS = 3
@@ -1010,11 +1014,14 @@ def _simulate(
                 elif position_side == "short" and 0 < trail_anchor_px < entry_px:
                     active_stop_pct = min(active_stop_pct, max(0.0, entry_px / trail_anchor_px - 1.0))
 
+            bars_held += 1
+            # Suppress trailing-stop exits during minimum holding period to avoid noise-whipsaws.
+            _sl_for_check = active_stop_pct if bars_held > _MIN_HOLD_BARS else initial_stop_pct * 0.5
             exit_on_bar = _check_bar_exit(
                 entry_px,
                 trail_anchor_px,
                 bar,
-                active_stop_pct,
+                _sl_for_check,
                 active_tp_pct,
                 side=position_side,
             )
@@ -1079,7 +1086,10 @@ def _simulate(
                     entry_fee_remaining = 0.0
                     active_stop_pct = 0.0
                     active_tp_pct = 0.0
+                    initial_stop_pct = 0.0
+                    trail_stop_pct = 0.0
                     breakeven_locked = False
+                    bars_held = 0
                     exit_hold_count = 0
                     if "stop" in reason:
                         stop_cooldown = _STOP_COOLDOWN_BARS
@@ -1130,7 +1140,10 @@ def _simulate(
                     entry_fee_remaining = 0.0
                     active_stop_pct = 0.0
                     active_tp_pct = 0.0
+                    initial_stop_pct = 0.0
+                    trail_stop_pct = 0.0
                     breakeven_locked = False
+                    bars_held = 0
                     exit_hold_count = 0
                     exited_this_bar = True
 
@@ -1180,6 +1193,8 @@ def _simulate(
                     )
                     position_qty -= partial_qty
                     partial_done = True
+                    # Widen trailing stop after partial — let remaining position ride the trend.
+                    active_stop_pct = trail_stop_pct
 
         if position_side == "long" and signal == "sell":
             agent_result = _surrogate_agent_decision(sig, threshold_value, for_exit=True)
@@ -1216,7 +1231,10 @@ def _simulate(
                 entry_fee_remaining = 0.0
                 active_stop_pct = 0.0
                 active_tp_pct = 0.0
+                initial_stop_pct = 0.0
+                trail_stop_pct = 0.0
                 breakeven_locked = False
+                bars_held = 0
                 exit_hold_count = 0
 
         elif position_side == "short" and signal == "buy":
@@ -1254,13 +1272,24 @@ def _simulate(
                 entry_fee_remaining = 0.0
                 active_stop_pct = 0.0
                 active_tp_pct = 0.0
+                initial_stop_pct = 0.0
+                trail_stop_pct = 0.0
                 breakeven_locked = False
+                bars_held = 0
                 exit_hold_count = 0
 
         if position_side is None and stop_cooldown == 0 and signal in ("buy", "sell"):
             wants_short = signal == "sell"
             if wants_short and not config.ALLOW_SHORT:
                 signal = "hold"
+            # Shorts require stronger confirmation: SPY must be bearish OR score very strong.
+            # Prevents shorting bull-market dips (false signals from lagging indicators).
+            if wants_short and signal == "sell":
+                _bar_mt = int(sig.get("market_trend") or 0)
+                _bar_score = int(sig.get("score") or 0)
+                _short_ok = _bar_mt == -1 or _bar_score <= -(threshold_value + 2)
+                if not _short_ok:
+                    signal = "hold"
             if signal in ("buy", "sell"):
                 agent_result = _surrogate_agent_decision(sig, threshold_value)
                 if agent_result["approved"]:
@@ -1276,7 +1305,7 @@ def _simulate(
                         last_order_at=last_order_at,
                         close_history=close_history,
                         atr=sig.get("atr"),
-                        realized_vol=sig.get("regime_realized_vol"),
+                        realized_vol=None,  # vol-targeting undersizes; use ATR+MAX_POSITION_PCT cap
                         risk_manager=risk_manager,
                     )
                     if ok:
@@ -1308,9 +1337,15 @@ def _simulate(
                             _computed_tp = (_atr_val * tp_atr_mult) / max(fill_entry_px, 1e-9)
                             # Use ATR-based SL in backtest — agent override bypasses optimizer grid.
                             # Ensure minimum of 0.3% to avoid noise-stop on illiquid bars.
-                            active_stop_pct = max(0.003, _computed_sl)
+                            initial_stop_pct = max(0.003, _computed_sl)
+                            active_stop_pct = initial_stop_pct
+                            # Adaptive trailing stop: strong signals (score≥5) use 6× initial SL
+                            # so the position rides the trend. Weak signals use 3×.
+                            _sig_score = abs(int(sig.get("score") or 0))
+                            trail_stop_pct = initial_stop_pct * (6.0 if _sig_score >= 5 else 3.0)
                             active_tp_pct = _computed_tp
                             breakeven_locked = False
+                            bars_held = 0
                             last_order_at[symbol.upper()] = ts_value
                             exit_hold_count = 0
 
@@ -1397,8 +1432,13 @@ def _build_spy_trend(timeframe: str, days: int) -> dict[str, int]:
         spy_df = pd.DataFrame(spy_bars)
         spy_df["c"] = spy_df["c"].astype(float)
         spy_df["t"] = pd.to_datetime(spy_df["t"])
+        ema50 = spy_df["c"].ewm(span=50, adjust=False).mean()
         ema200 = spy_df["c"].ewm(span=200, adjust=False).mean()
-        raw_trend = np.where(spy_df["c"] >= ema200, 1, -1)
+        # Drawdown from 20-day rolling high — catches sharp corrections faster than EMA.
+        rolling_high = spy_df["c"].rolling(20, min_periods=1).max()
+        drawdown = (spy_df["c"] - rolling_high) / rolling_high  # negative = below peak
+        # Bear: price below 50-EMA OR significant drawdown (>5% from 20d high)
+        raw_trend = np.where((spy_df["c"] >= ema50) & (spy_df["c"] >= ema200) & (drawdown >= -0.05), 1, -1)
         date_strings = spy_df["t"].dt.strftime("%Y-%m-%d")
         trend: dict[str, int] = {}
         for idx in range(1, len(spy_df)):
@@ -2377,7 +2417,7 @@ def run_portfolio(
                         last_order_at=last_order_at,
                         close_history=close_history,
                         atr=sig.get("atr"),
-                        realized_vol=sig.get("regime_realized_vol"),
+                        realized_vol=None,  # vol-targeting undersizes; use ATR+MAX_POSITION_PCT cap
                         risk_manager=risk_manager,
                     )
                     if ok:
