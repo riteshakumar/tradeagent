@@ -53,7 +53,12 @@ def _get_market_trend() -> int:
     Return +1 if SPY is above its 200-day EMA (bull market), -1 if below.
     Always uses daily bars regardless of strategy timeframe so EMA200 is meaningful.
     Returns 0 (neutral) on any error so trading is never inadvertently blocked.
+    Respects 'market_trend_override' from settings_store: 1=bull, -1=bear, 0=auto.
     """
+    override = settings_store.get("market_trend_override", 0)
+    if override in (1, -1):
+        log.info("Market trend OVERRIDDEN via settings: %s", "BULL" if override == 1 else "BEAR")
+        return int(override)
     try:
         spy_bars = broker.get_bars("SPY", timeframe="1Day", lookback_days=250)
         if not spy_bars or len(spy_bars) < 30:
@@ -261,6 +266,8 @@ def _load_runtime_overrides() -> None:
         config.MAX_CORRELATED_POSITIONS = max(1, int(saved["max_correlated_positions"]))
     if "correlation_lookback_days" in saved:
         config.CORRELATION_LOOKBACK_DAYS = max(20, min(365, int(saved["correlation_lookback_days"])))
+    if "enable_regime_switching" in saved:
+        config.ENABLE_REGIME_SWITCHING = bool(saved["enable_regime_switching"])
 
     if config.SHADOW_MODE:
         config.DRY_RUN = True
@@ -903,14 +910,19 @@ def run_once() -> None:
 
     # ── Dynamic market phase detection ─────────────────────────────────────────
     # Classify regime → adjust SIGNAL_THRESHOLD + ALLOW_SHORT live each tick.
-    _market_phase = "bull"
-    try:
-        _spy_bars = broker.get_bars("SPY", timeframe="1Day", lookback_days=30)
-        if _spy_bars and len(_spy_bars) >= 10:
-            _spy_closes = [float(b["c"]) for b in _spy_bars]
-            _market_phase = strategy.detect_market_phase(_spy_closes, lookback=20)
-    except Exception as _exc:
-        log.warning("Market phase detection failed: %s", _exc)
+    _phase_override = settings_store.get("market_phase_override", "auto")
+    if _phase_override in ("bull", "bear", "volatile", "sideways"):
+        _market_phase = _phase_override
+        log.info("Market phase OVERRIDDEN via settings: %s", _market_phase.upper())
+    else:
+        _market_phase = "bull"
+        try:
+            _spy_bars = broker.get_bars("SPY", timeframe="1Day", lookback_days=30)
+            if _spy_bars and len(_spy_bars) >= 10:
+                _spy_closes = [float(b["c"]) for b in _spy_bars]
+                _market_phase = strategy.detect_market_phase(_spy_closes, lookback=20)
+        except Exception as _exc:
+            log.warning("Market phase detection failed: %s", _exc)
 
     _phase_label = _market_phase.upper()
     log.info("Market phase: %s", _phase_label)

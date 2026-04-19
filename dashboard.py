@@ -727,6 +727,57 @@ div[data-testid="stRadio"] label:has(input:checked) {
 }
 div[data-testid="stRadio"] label:has(input:checked) p { color: #ecfeff !important; }
 
+/* ── Workspace nav: tab style ───────────────────────────────────────────────── */
+.nav-tab-row div[data-testid="stRadio"] > div {
+    gap: 0;
+    flex-wrap: nowrap;
+    border-bottom: 2px solid #1e3a52;
+    padding-bottom: 0;
+}
+.nav-tab-row div[data-testid="stRadio"] label {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    border-bottom: 3px solid transparent;
+    padding: 0.45rem 1.1rem 0.4rem;
+    margin-bottom: -2px;
+    transition: color 0.15s, border-color 0.15s;
+    transform: none !important;
+}
+.nav-tab-row div[data-testid="stRadio"] label:hover {
+    border-bottom-color: #4d729a;
+    background: rgba(255,255,255,0.03);
+    transform: none !important;
+}
+.nav-tab-row div[data-testid="stRadio"] label p {
+    font-size: 0.82rem !important;
+    font-weight: 700 !important;
+    color: #7ca3c4 !important;
+    white-space: nowrap;
+}
+.nav-tab-row div[data-testid="stRadio"] label:has(input:checked) {
+    border-bottom: 3px solid #67e8f9;
+    background: transparent;
+    box-shadow: none;
+}
+.nav-tab-row div[data-testid="stRadio"] label:has(input:checked) p {
+    color: #ecfeff !important;
+}
+/* Secondary row (panels): slightly smaller, accent color */
+.nav-tab-row--secondary div[data-testid="stRadio"] > div {
+    border-bottom-color: #162333;
+}
+.nav-tab-row--secondary div[data-testid="stRadio"] label:has(input:checked) {
+    border-bottom-color: #38bdf8;
+}
+.nav-tab-row--secondary div[data-testid="stRadio"] label p {
+    font-size: 0.77rem !important;
+    color: #5a8aaa !important;
+}
+.nav-tab-row--secondary div[data-testid="stRadio"] label:has(input:checked) p {
+    color: #bae6fd !important;
+}
+
 [data-testid="stSelectbox"] > div > div,
 [data-testid="stNumberInput"] input,
 [data-testid="stTextInput"] input,
@@ -1429,6 +1480,9 @@ def render_workspace_focus(panel_id: str):
         unsafe_allow_html=True,
     )
 
+_PANEL_TO_TAB = {}   # unused sentinel kept for request_workspace_panel compat
+
+
 def render_panel_nav(active_panel_id: str) -> str:
     panel_ids = [p["id"] for p in _PANEL_META]
     panel_lookup = {p["id"]: p for p in _PANEL_META}
@@ -1443,8 +1497,8 @@ def render_panel_nav(active_panel_id: str) -> str:
     if st.session_state["workspace_panel_group"] not in group_names:
         st.session_state["workspace_panel_group"] = group_names[0]
 
-    st.markdown('<div class="workspace-nav-note">Choose lane, then panel.</div>', unsafe_allow_html=True)
     lane_icons = {"Trade Desk": "◈", "Research": "◬", "Setup": "◫"}
+    st.markdown('<div class="nav-tab-row" id="nav-lane-row">', unsafe_allow_html=True)
     group_choice = st.radio(
         "Lane",
         group_names,
@@ -1453,11 +1507,14 @@ def render_panel_nav(active_panel_id: str) -> str:
         label_visibility="collapsed",
         format_func=lambda g: f'{lane_icons.get(g, "◉")} {g}',
     )
+    st.markdown('</div>', unsafe_allow_html=True)
+
     group_panels = _PANEL_GROUPS[group_choice]
     current_panel = st.session_state.get("workspace_panel_nav", active_panel_id)
     if current_panel not in group_panels:
         st.session_state["workspace_panel_nav"] = group_panels[0]
 
+    st.markdown('<div class="nav-tab-row nav-tab-row--secondary">', unsafe_allow_html=True)
     selected_id = st.radio(
         "Workspace panel",
         group_panels,
@@ -1466,10 +1523,7 @@ def render_panel_nav(active_panel_id: str) -> str:
         key="workspace_panel_nav",
         format_func=lambda pid: f'{panel_lookup[pid]["icon"]} {panel_lookup[pid]["label"]}',
     )
-    st.markdown(
-        f'<div class="workspace-active-chip"><b>Active</b>{panel_lookup[selected_id]["label"]}</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('</div>', unsafe_allow_html=True)
     return selected_id
 
 def request_workspace_panel(panel_id: str, rerun_now: bool = True):
@@ -2079,6 +2133,9 @@ def render_control_deck(sidebar_mode: bool = False):
     dry_run_ui = bool(_saved_settings.get("dry_run", config.DRY_RUN))
     shadow_mode = bool(_saved_settings.get("shadow_mode", getattr(config, "SHADOW_MODE", False)))
     allow_short = bool(_saved_settings.get("allow_short", config.ALLOW_SHORT))
+    enable_regime_switching = bool(_saved_settings.get("enable_regime_switching", getattr(config, "ENABLE_REGIME_SWITCHING", True)))
+    _mt_override_saved = int(_saved_settings.get("market_trend_override", 0))
+    _phase_override_saved = str(_saved_settings.get("market_phase_override", "auto"))
 
     _sl_default = int(_saved_settings.get("sl_pct", config.STOP_LOSS_PCT) * 100)
     _tp_default = int(_saved_settings.get("tp_pct", config.TAKE_PROFIT_PCT) * 100)
@@ -2185,10 +2242,76 @@ def render_control_deck(sidebar_mode: bool = False):
             dry_run_ui = st.toggle("Dry Run", value=dry_run_ui, key="dry_run_toggle")
             shadow_mode = st.toggle("Shadow Mode", value=shadow_mode, key="shadow_mode_toggle")
             allow_short = st.toggle("Allow Short Selling", value=allow_short, key="allow_short_toggle")
+            enable_regime_switching = st.toggle(
+                "Regime Switching",
+                value=enable_regime_switching,
+                key="enable_regime_switching_toggle",
+                help="When off: regime_params() skipped — flat position sizing, no bear/vol adjustments.",
+            )
+
+            # SPY trend: mutually exclusive toggles via intent key set before widget creation
+            if "_mt_intent" not in st.session_state:
+                if _mt_override_saved == 1:
+                    st.session_state["_mt_intent"] = "bull"
+                elif _mt_override_saved == -1:
+                    st.session_state["_mt_intent"] = "bear"
+                else:
+                    st.session_state["_mt_intent"] = "auto"
+
+            def _on_bull_change():
+                if st.session_state["force_bull_toggle"]:
+                    st.session_state["_mt_intent"] = "bull"
+                elif st.session_state["_mt_intent"] == "bull":
+                    st.session_state["_mt_intent"] = "auto"
+
+            def _on_bear_change():
+                if st.session_state["force_bear_toggle"]:
+                    st.session_state["_mt_intent"] = "bear"
+                elif st.session_state["_mt_intent"] == "bear":
+                    st.session_state["_mt_intent"] = "auto"
+
+            # Set widget keys from intent BEFORE widget creation (allowed pre-instantiation)
+            _mt_intent = st.session_state.get("_mt_intent", "auto")
+            st.session_state["force_bull_toggle"] = (_mt_intent == "bull")
+            st.session_state["force_bear_toggle"] = (_mt_intent == "bear")
+
+            force_bull = st.toggle(
+                "Force Bull Market",
+                key="force_bull_toggle",
+                on_change=_on_bull_change,
+                help="Override SPY trend to +1 (bull). Disables live EMA200 check.",
+            )
+            force_bear = st.toggle(
+                "Force Bear Market",
+                key="force_bear_toggle",
+                on_change=_on_bear_change,
+                help="Override SPY trend to -1 (bear). Raises threshold, cuts size, enables shorts.",
+            )
+            if force_bull:
+                _mt_override_new = 1
+            elif force_bear:
+                _mt_override_new = -1
+            else:
+                _mt_override_new = 0
+
+            _phase_options = ["auto", "bull", "bear", "volatile", "sideways"]
+            _phase_idx = _phase_options.index(_phase_override_saved) if _phase_override_saved in _phase_options else 0
+            _phase_sel = st.selectbox(
+                "Market Phase Override",
+                _phase_options,
+                index=_phase_idx,
+                key="market_phase_override_select",
+                format_func=lambda x: x.title(),
+                help="Override detect_market_phase(). Bear→threshold+1, size×0.6, shorts on. Volatile→threshold+1, size×0.5, SL×1.5.",
+            )
+
             settings_store.save({
                 "dry_run": dry_run_ui,
                 "shadow_mode": shadow_mode,
                 "allow_short": allow_short,
+                "enable_regime_switching": enable_regime_switching,
+                "market_trend_override": _mt_override_new,
+                "market_phase_override": _phase_sel,
             })
 
             manual_symbol = st.selectbox(
@@ -2328,6 +2451,9 @@ def render_control_deck(sidebar_mode: bool = False):
         "dry_run_ui": dry_run_ui,
         "shadow_mode": shadow_mode,
         "allow_short": allow_short,
+        "enable_regime_switching": enable_regime_switching,
+        "market_trend_override": _mt_override_new,
+        "market_phase_override": _phase_sel,
     }
 
 # ── Header ─────────────────────────────────────────────────────────────────────
@@ -2542,6 +2668,74 @@ def render_overview_panel():
 
     section("Overview Desk", "#14b8a6")
     render_panel_quick_actions("overview")
+
+    # ── Market mode status bar ──────────────────────────────────────────────────
+    _mt_override = control_state.get("market_trend_override", 0)
+    _phase_override = control_state.get("market_phase_override", "auto")
+    _regime_on = control_state.get("enable_regime_switching", True)
+
+    # Resolve displayed SPY trend
+    if _mt_override == 1:
+        _spy_label, _spy_color = "BULL (forced)", "#34d399"
+    elif _mt_override == -1:
+        _spy_label, _spy_color = "BEAR (forced)", "#f87171"
+    else:
+        try:
+            _spy_bars_ov = broker.get_bars("SPY", timeframe="1Day", lookback_days=250)
+            if _spy_bars_ov and len(_spy_bars_ov) >= 30:
+                import pandas as _pd_ov
+                _closes_ov = _pd_ov.Series([float(b["c"]) for b in _spy_bars_ov])
+                _ema200_ov = _closes_ov.ewm(span=200, adjust=False).mean()
+                _spy_live = 1 if float(_closes_ov.iloc[-1]) >= float(_ema200_ov.iloc[-1]) else -1
+            else:
+                _spy_live = 0
+        except Exception:
+            _spy_live = 0
+        if _spy_live == 1:
+            _spy_label, _spy_color = "BULL", "#34d399"
+        elif _spy_live == -1:
+            _spy_label, _spy_color = "BEAR", "#f87171"
+        else:
+            _spy_label, _spy_color = "UNKNOWN", "#94a3b8"
+
+    # Resolve market phase
+    if _phase_override != "auto":
+        _phase_label_ov = f"{_phase_override.upper()} (forced)"
+        _phase_colors = {"bull": "#34d399", "bear": "#f87171", "volatile": "#fb923c", "sideways": "#94a3b8"}
+        _phase_color = _phase_colors.get(_phase_override, "#94a3b8")
+    else:
+        try:
+            _spy_bars_ph = broker.get_bars("SPY", timeframe="1Day", lookback_days=30)
+            if _spy_bars_ph and len(_spy_bars_ph) >= 10:
+                _ph_closes = [float(b["c"]) for b in _spy_bars_ph]
+                _live_phase = strategy.detect_market_phase(_ph_closes, lookback=20)
+            else:
+                _live_phase = "unknown"
+        except Exception:
+            _live_phase = "unknown"
+        _phase_label_ov = _live_phase.upper()
+        _phase_colors = {"BULL": "#34d399", "BEAR": "#f87171", "VOLATILE": "#fb923c", "SIDEWAYS": "#94a3b8"}
+        _phase_color = _phase_colors.get(_phase_label_ov, "#94a3b8")
+
+    _regime_label = "ON" if _regime_on else "OFF"
+    _regime_color = "#34d399" if _regime_on else "#f87171"
+
+    st.markdown(
+        f"""<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+        <span style="background:#1e293b;border:1px solid #334155;border-radius:6px;padding:4px 12px;font-size:0.78rem;">
+            SPY trend: <b style="color:{_spy_color}">{_spy_label}</b>
+        </span>
+        <span style="background:#1e293b;border:1px solid #334155;border-radius:6px;padding:4px 12px;font-size:0.78rem;">
+            Phase: <b style="color:{_phase_color}">{_phase_label_ov}</b>
+        </span>
+        <span style="background:#1e293b;border:1px solid #334155;border-radius:6px;padding:4px 12px;font-size:0.78rem;">
+            Regime switching: <b style="color:{_regime_color}">{_regime_label}</b>
+        </span>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    # ────────────────────────────────────────────────────────────────────────────
+
     render_screener_snapshot(watch_source, top_n)
     if "ov_agent_scan" not in st.session_state:
         st.session_state["ov_agent_scan"] = False
