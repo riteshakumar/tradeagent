@@ -10,7 +10,7 @@ import config
 # ---------------------------------------------------------------------------
 _REGIME_WEIGHTS = {
     "bull_trend":     {"rsi": 0.75, "macd": 1.25, "ema": 1.50, "bb": 0.75, "volume": 1.0, "momentum": 1.25, "breakout": 1.50, "supertrend": 1.50, "vwap": 1.0},
-    "bear_trend":     {"rsi": 0.75, "macd": 1.25, "ema": 1.50, "bb": 0.75, "volume": 1.0, "momentum": 1.25, "breakout": 1.50, "supertrend": 1.50, "vwap": 1.0},
+    "bear_trend":     {"rsi": 1.20, "macd": 1.00, "ema": 0.80, "bb": 1.20, "volume": 1.1, "momentum": 0.90, "breakout": 1.10, "supertrend": 1.00, "vwap": 1.0},
     "range":          {"rsi": 1.20, "macd": 0.80, "ema": 0.70, "bb": 1.40, "volume": 1.0, "momentum": 0.80, "breakout": 1.00, "supertrend": 0.70, "vwap": 1.0},
     "high_volatility":{"rsi": 0.90, "macd": 0.80, "ema": 0.80, "bb": 1.30, "volume": 1.2, "momentum": 1.00, "breakout": 1.20, "supertrend": 1.00, "vwap": 1.0},
 }
@@ -267,12 +267,16 @@ def _ema_score(price: float, e20: float, e50: float, e200: float,
     return 0, ""
 
 
-def _bb_score(price: float, upper: float, lower: float, bb_width_pct: float | None = None) -> tuple[int, str]:
-    """Bollinger Band score with squeeze filter."""
+def _bb_score(price: float, upper: float, lower: float, bb_width_pct: float | None = None, atr_pct: float | None = None) -> tuple[int, str]:
+    """Bollinger Band score with ATR-relative squeeze filter."""
     if np.isnan(upper) or np.isnan(lower):
         return 0, ""
-    if bb_width_pct is not None and bb_width_pct < 0.02:
-        return 0, ""
+    if bb_width_pct is not None:
+        # ATR-relative squeeze: BB width < 0.8× ATR means bands narrower than typical range.
+        # Fixed 2% threshold was too coarse — high-priced stocks ($400+) have wider ATR-pct.
+        squeeze_thresh = (atr_pct * 0.8) if (atr_pct is not None and atr_pct > 0) else 0.02
+        if bb_width_pct < squeeze_thresh:
+            return 0, ""
     if price < lower:
         return 2, f"price below lower BB ({price:.2f} < {lower:.2f})"
     if price > upper:
@@ -359,8 +363,16 @@ def _volume_score(volume: pd.Series, current_score: float) -> tuple[int, str]:
     return 0, ""
 
 
-def _momentum_score(close: pd.Series, period: int = 5) -> tuple[int, str]:
-    """5-period ROC momentum — only scores on significant moves (>3%)."""
+# Timeframe-appropriate ROC thresholds for momentum scoring.
+# 3% in 5 bars is rare at 15Min (75 min); trending moves at 0.5-1%/bar never scored.
+# 1Day: 3% in 5 days is a genuine momentum move — keep high.
+_MOMENTUM_ROC_THRESHOLDS: dict[str, float] = {
+    "1Min": 0.5, "5Min": 1.5, "15Min": 1.5, "1Hour": 2.0, "1Day": 3.0
+}
+
+
+def _momentum_score(close: pd.Series, period: int = 5, timeframe: str = "1Day") -> tuple[int, str]:
+    """5-period ROC momentum. Threshold adapts to timeframe — lower for intraday."""
     if len(close) < period + 1:
         return 0, ""
     past_price = float(close.iloc[-(period + 1)])
@@ -368,10 +380,11 @@ def _momentum_score(close: pd.Series, period: int = 5) -> tuple[int, str]:
     if past_price <= 0:
         return 0, ""
     roc = (current_price - past_price) / past_price * 100
-    if roc >= 3.0:
-        return 1, f"bullish momentum ROC({period})={roc:.1f}%"
-    if roc <= -3.0:
-        return -1, f"bearish momentum ROC({period})={roc:.1f}%"
+    roc_thresh = _MOMENTUM_ROC_THRESHOLDS.get(timeframe, 3.0)
+    if roc >= roc_thresh:
+        return 1, f"bullish momentum ROC({period})={roc:.1f}% (thresh={roc_thresh}%)"
+    if roc <= -roc_thresh:
+        return -1, f"bearish momentum ROC({period})={roc:.1f}% (thresh={roc_thresh}%)"
     return 0, ""
 
 
@@ -419,7 +432,9 @@ def detect_regime(df: pd.DataFrame, timeframe: str = "1Day") -> dict:
     ema50 = _ema(close, 50).iloc[-1]
     price = float(close.iloc[-1])
     trend_strength = ((ema20 - ema50) / price) if price else 0.0
-    bar_vol = float(close.pct_change().dropna().tail(20).std())
+    # 60-bar window: 3 trading days at 15Min, 60 days at 1Day — stable regime detection.
+    # 20-bar was 1 day at 15Min; a single volatile day flipped regime and cut position size.
+    bar_vol = float(close.pct_change().dropna().tail(60).std())
     realized_vol = bar_vol * (_PERIODS_PER_DAY.get(timeframe, 1.0) ** 0.5)
 
     trend_threshold = config.TREND_STRENGTH_THRESHOLD
@@ -482,6 +497,11 @@ def _score_components(
     last_mid   = float(bb_mid.iloc[-1]) if not np.isnan(bb_mid.iloc[-1]) else None
     bb_width_pct = ((last_upper - last_lower) / last_mid) if last_mid and last_mid > 0 else None
 
+    # ATR for BB squeeze filter (ATR-relative threshold replaces fixed 2%)
+    atr_series = _atr(df)
+    last_atr   = float(atr_series.iloc[-1]) if not np.isnan(atr_series.iloc[-1]) else None
+    atr_pct    = (last_atr / price) if (last_atr is not None and price > 0) else None
+
     adx_series = _adx(df)
     adx_value  = float(adx_series.iloc[-1]) if not np.isnan(adx_series.iloc[-1]) else 0.0
 
@@ -499,7 +519,7 @@ def _score_components(
             "rsi":        _rsi_score(last_rsi, prev_rsi),
             "macd":       _macd_score(macd_line, signal_line),
             "ema":        _ema_score(price, e20, e50, e200, e20_prev, e50_prev),
-            "bb":         _bb_score(price, last_upper, last_lower, bb_width_pct),
+            "bb":         _bb_score(price, last_upper, last_lower, bb_width_pct, atr_pct),
             "supertrend": _supertrend_score(st_dir),
         }.items():
             if score:
@@ -531,7 +551,7 @@ def _score_components(
         # RANGING mode: mean-reversion only
         for name, (score, reason) in {
             "rsi": _rsi_score(last_rsi, prev_rsi),
-            "bb":  _bb_score(price, last_upper, last_lower, bb_width_pct),
+            "bb":  _bb_score(price, last_upper, last_lower, bb_width_pct, atr_pct),
         }.items():
             if score:
                 component_scores[name] = score
@@ -543,7 +563,7 @@ def _score_components(
             "rsi":        _rsi_score(last_rsi, prev_rsi),
             "macd":       _macd_score(macd_line, signal_line),
             "ema":        _ema_score(price, e20, e50, e200, e20_prev, e50_prev),
-            "bb":         _bb_score(price, last_upper, last_lower, bb_width_pct),
+            "bb":         _bb_score(price, last_upper, last_lower, bb_width_pct, atr_pct),
             "supertrend": _supertrend_score(st_dir),
         }.items():
             if score:
@@ -555,8 +575,8 @@ def _score_components(
             component_scores["breakout"] = bo_score
             component_reasons["breakout"] = bo_reason
 
-    # Momentum (always active)
-    mom_score, mom_reason = _momentum_score(close)
+    # Momentum (always active) — threshold adapts to timeframe
+    mom_score, mom_reason = _momentum_score(close, timeframe=timeframe)
     if mom_score:
         component_scores["momentum"] = mom_score
         component_reasons["momentum"] = mom_reason
@@ -575,11 +595,7 @@ def _score_components(
         component_scores["volume"] = vol_score
         component_reasons["volume"] = vol_reason
 
-    # Minimum indicator agreement: ≥2 main indicators must agree
-    if not _check_indicator_agreement(component_scores):
-        component_scores  = {}
-        component_reasons = {}
-
+    # Agreement check moved to callers — they apply 0.5× soft penalty instead of hard zero.
     return component_scores, component_reasons, regime, adx_value
 
 
@@ -637,12 +653,14 @@ def compute_signals(
         is_intraday=is_intraday,
     )
     disabled = {str(name).strip().lower() for name in (disabled_components or set()) if str(name).strip()}
+    # Soft agreement: 0.5× multiplier when indicators conflict instead of full zero-wipe.
+    # Strong signals (score≥6) still exceed threshold after halving; weak mixed signals hold.
+    _agree_factor = 1.0 if _check_indicator_agreement(component_scores) else 0.5
     if disabled:
         component_scores = {name: score for name, score in component_scores.items() if name not in disabled}
         component_reasons = {name: reason for name, reason in component_reasons.items() if name not in disabled}
         if not _check_indicator_agreement(component_scores):
-            component_scores = {}
-            component_reasons = {}
+            _agree_factor = min(_agree_factor, 0.5)
 
     weights = _BASE_WEIGHTS
     if config.ENABLE_REGIME_SWITCHING:
@@ -654,6 +672,9 @@ def compute_signals(
         weight = float(weights.get(name, 1.0))
         weighted_score += raw * weight
         reasons.append(f"{component_reasons[name]} [{name} x{weight:.2f}]")
+    if _agree_factor < 1.0:
+        weighted_score *= _agree_factor
+        reasons.append(f"[agreement penalty: ×{_agree_factor:.1f}]")
 
     # SPY bear-market penalty: raises effective threshold by 1 (soft, not hard block)
     # Hard block was killing dip-buy opportunities; _ema_score already penalises downtrends.
@@ -772,7 +793,7 @@ def precompute_series(df: pd.DataFrame, timeframe: str | None = None) -> dict:
 
     # For regime detection per bar
     trend_strength_s = (ema20_s - ema50_s) / close.replace(0, np.nan)
-    realized_vol_s = close.pct_change().rolling(20, min_periods=10).std() * (periods_per_day ** 0.5)
+    realized_vol_s = close.pct_change().rolling(60, min_periods=20).std() * (periods_per_day ** 0.5)
 
     return {
         "timeframe": resolved_tf,
@@ -848,6 +869,11 @@ def signal_at_index(
     bb_mid_v = _f(pre["bb_mid"])
     bb_width_pct = ((bb_upper - bb_lower) / bb_mid_v) if bb_mid_v and bb_mid_v > 0 and bb_mid_v == bb_mid_v else None
 
+    atr_v  = _f(pre["atr"])
+    atr_v  = atr_v if atr_v == atr_v else None
+    # ATR-pct for BB squeeze filter (computed early — needed before bb_sc below)
+    _bb_atr_pct = (atr_v / price) if (atr_v is not None and price > 0) else None
+
     adx_val = _f(pre["adx"])
     adx_val = adx_val if adx_val == adx_val else 0.0
 
@@ -861,9 +887,6 @@ def signal_at_index(
     roll_high = _f(pre["roll_high20"]); roll_low = _f(pre["roll_low20"])
 
     vwap_v = _f(pre["vwap"])
-
-    atr_v  = _f(pre["atr"])
-    atr_v  = atr_v if atr_v == atr_v else None
 
     # --- Regime detection from precomputed scalars ---
     ts_v = _f(pre["trend_strength"]); rv_v = _f(pre["realized_vol"])
@@ -897,7 +920,7 @@ def signal_at_index(
     rsi_sc, rsi_r = _rsi_score(last_rsi, prev_rsi)
     macd_sc, macd_r = _macd_score(macd_slice, sig_slice) if len(macd_slice) >= 2 else (0, "")
     ema_sc, ema_r = _ema_score(price, e20, e50, e200, e20_prev, e50_prev)
-    bb_sc, bb_r = _bb_score(price, bb_upper, bb_lower, bb_width_pct)
+    bb_sc, bb_r = _bb_score(price, bb_upper, bb_lower, bb_width_pct, _bb_atr_pct)
     st_sc, st_r = _supertrend_score(st_dir_slice) if len(st_dir_slice) >= 2 else (0, "")
 
     # Breakout inline (needs precomputed rolling high/low)
@@ -927,12 +950,13 @@ def signal_at_index(
         _add("ema", ema_sc, ema_r); _add("bb", bb_sc, bb_r)
         _add("supertrend", st_sc, st_r); _add("breakout", bo_sc, bo_r)
 
-    # Momentum (always)
+    # Momentum (always) — threshold adapts to timeframe
+    _mom_thresh = _MOMENTUM_ROC_THRESHOLDS.get(timeframe, 3.0)
     if mom_roc_v == mom_roc_v:
-        if mom_roc_v >= 3.0:
-            _add("momentum", 1, f"bullish momentum ROC(5)={mom_roc_v:.1f}%")
-        elif mom_roc_v <= -3.0:
-            _add("momentum", -1, f"bearish momentum ROC(5)={mom_roc_v:.1f}%")
+        if mom_roc_v >= _mom_thresh:
+            _add("momentum", 1, f"bullish momentum ROC(5)={mom_roc_v:.1f}% (thresh={_mom_thresh}%)")
+        elif mom_roc_v <= -_mom_thresh:
+            _add("momentum", -1, f"bearish momentum ROC(5)={mom_roc_v:.1f}% (thresh={_mom_thresh}%)")
 
     # VWAP (intraday only)
     if is_intraday and vwap_v == vwap_v and vwap_v > 0:
@@ -942,11 +966,11 @@ def signal_at_index(
         elif diff_pct < -0.5:
             _add("vwap", -1, f"price below VWAP by {abs(diff_pct):.1f}%")
 
-    # Indicator agreement check
-    if not _check_indicator_agreement(component_scores):
-        component_scores = {}; component_reasons = {}
+    # Soft agreement: 0.5× on weighted_score instead of zeroing all components.
+    # Strong signals still clear threshold after halving; weak mixed signals become hold.
+    _agree_factor = 1.0 if _check_indicator_agreement(component_scores) else 0.5
 
-    # Volume confirm
+    # Volume confirm (after agreement check — uses pre-agreement component sum)
     base_score = float(sum(component_scores.values()))
     if avg_vol20 > 0:
         ratio = last_vol / avg_vol20
@@ -966,6 +990,9 @@ def signal_at_index(
         w = float(weights.get(name, 1.0))
         weighted_score += raw * w
         reasons.append(f"{component_reasons[name]} [{name} x{w:.2f}]")
+    if _agree_factor < 1.0:
+        weighted_score *= _agree_factor
+        reasons.append(f"[agreement penalty: ×{_agree_factor:.1f}]")
 
     if market_trend == -1:
         weighted_score -= 1.0
@@ -1003,6 +1030,74 @@ def signal_at_index(
         **{field: component_scores.get(comp, 0) for field, comp in component_field_map.items()},
         "adx_score": 1 if adx_val >= _ADX_TREND_MIN else (-1 if 0 < adx_val < _ADX_RANGE_MAX else 0),
     }
+
+
+def regime_params(regime: str, market_trend: int, realized_vol: float = 0.0) -> dict:
+    """
+    Map (stock regime, SPY trend, realized_vol) → per-bar trade profile.
+
+    Returns:
+        sl_mult_factor   – multiply base SL_ATR_MULT by this (e.g. 0.75 = tighter stop)
+        size_factor      – multiply computed qty by this (0.0–1.0)
+        threshold_offset – add to base threshold (positive = more selective)
+        allow_short      – override shorts on/off (None = respect config default)
+
+    Optimized via grid search (Apr 2026) across META/GOOGL/AMZN/MSFT/QQQ/AAPL:
+      - Range regime dominates (89% of bars): wider SL + higher size maximises sharpe×return
+      - Bear params: tighter SL + smaller size to limit drawdown in downturns
+      - Bull_trend params: unchanged (only 2% of bars, no measurable difference)
+    """
+    # High-volatility regime: widen stop to absorb noise, cut size, raise bar
+    if regime == "high_volatility" or realized_vol > 0.025:
+        return {"sl_mult_factor": 1.5, "size_factor": 0.5, "threshold_offset": 1, "allow_short": False}
+
+    # Bear trend on stock — SPY also bearish: tight stop, minimal size, allow shorts
+    # Optimized: sl=0.5, sz=0.4 (vs original sl=0.75, sz=0.6)
+    if regime == "bear_trend" and market_trend == -1:
+        return {"sl_mult_factor": 0.5, "size_factor": 0.4, "threshold_offset": 1, "allow_short": True}
+
+    # Bear trend on stock but SPY still bullish (stock-specific weakness): cautious
+    # Optimized: sl=0.5, sz=0.44 (vs original sl=1.0, sz=0.7)
+    if regime == "bear_trend":
+        return {"sl_mult_factor": 0.5, "size_factor": 0.44, "threshold_offset": 1, "allow_short": False}
+
+    # SPY bearish but stock not yet bear — defensive, allow shorts
+    # Optimized: sl=0.5, sz=0.4 (vs original sl=0.75, sz=0.6)
+    if market_trend == -1:
+        return {"sl_mult_factor": 0.5, "size_factor": 0.4, "threshold_offset": 1, "allow_short": True}
+
+    # Bull trend — let winners run (unchanged: only 2% of bars, params make no diff)
+    if regime == "bull_trend":
+        return {"sl_mult_factor": 1.25, "size_factor": 1.0, "threshold_offset": 0, "allow_short": False}
+
+    # Sideways/range (dominant regime, 89% of bars) — wider SL + higher size
+    # Optimized: sl=1.5, sz=1.1 (vs original sl=1.0, sz=0.9) — score +37%
+    return {"sl_mult_factor": 1.5, "size_factor": 1.1, "threshold_offset": 0, "allow_short": False}
+
+
+def detect_market_phase(spy_closes: list[float], lookback: int = 20) -> str:
+    """
+    Classify current market phase from recent SPY closes.
+    Returns: 'bull' | 'bear' | 'volatile' | 'sideways'
+    """
+    if len(spy_closes) < lookback:
+        return "sideways"
+    arr = spy_closes[-lookback:]
+    import numpy as _np
+    returns = _np.diff(arr) / _np.array(arr[:-1])
+    realized_vol = float(_np.std(returns) * _np.sqrt(252))
+    ema_short = float(pd.Series(arr).ewm(span=10, adjust=False).mean().iloc[-1])
+    ema_long  = float(pd.Series(arr).ewm(span=20, adjust=False).mean().iloc[-1])
+    peak      = max(arr)
+    drawdown  = (arr[-1] - peak) / peak if peak > 0 else 0.0
+
+    if realized_vol > 0.30:        # annualized vol > 30%
+        return "volatile"
+    if arr[-1] < ema_short < ema_long or drawdown < -0.05:
+        return "bear"
+    if arr[-1] > ema_short > ema_long:
+        return "bull"
+    return "sideways"
 
 
 def apply_event_score(quant: dict, event: dict, threshold: int | None = None) -> dict:

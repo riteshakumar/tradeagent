@@ -901,9 +901,52 @@ def run_once() -> None:
     market_trend = _get_market_trend()
     log.info("Market trend (SPY vs EMA200): %s", "BULL" if market_trend == 1 else ("BEAR" if market_trend == -1 else "UNKNOWN"))
 
-    _orig_threshold = config.SIGNAL_THRESHOLD
+    # ── Dynamic market phase detection ─────────────────────────────────────────
+    # Classify regime → adjust SIGNAL_THRESHOLD + ALLOW_SHORT live each tick.
+    _market_phase = "bull"
+    try:
+        _spy_bars = broker.get_bars("SPY", timeframe="1Day", lookback_days=30)
+        if _spy_bars and len(_spy_bars) >= 10:
+            _spy_closes = [float(b["c"]) for b in _spy_bars]
+            _market_phase = strategy.detect_market_phase(_spy_closes, lookback=20)
+    except Exception as _exc:
+        log.warning("Market phase detection failed: %s", _exc)
+
+    _phase_label = _market_phase.upper()
+    log.info("Market phase: %s", _phase_label)
+
+    # Phase-specific overrides (stored as originals, restored after tick)
+    _orig_threshold  = config.SIGNAL_THRESHOLD
+    _orig_allow_short = config.ALLOW_SHORT
+    _orig_sl_atr_mult = config.SL_ATR_MULT
+    _orig_max_pos     = config.MAX_POSITION_PCT
+
+    if _market_phase == "bear":
+        # Bear: raise bar, cut size, allow daily shorts, tighter SL
+        config.SIGNAL_THRESHOLD  = _orig_threshold + 1
+        config.ALLOW_SHORT       = True
+        config.SL_ATR_MULT       = max(1.0, _orig_sl_atr_mult * 0.75)
+        config.MAX_POSITION_PCT  = _orig_max_pos * 0.6
+        log.warning("BEAR phase: threshold+1, size×0.6, SL×0.75, shorts enabled")
+    elif _market_phase == "volatile":
+        # Volatile: widen SL to absorb noise, cut size, raise bar, no shorts
+        config.SIGNAL_THRESHOLD  = _orig_threshold + 1
+        config.ALLOW_SHORT       = False
+        config.SL_ATR_MULT       = _orig_sl_atr_mult * 1.5
+        config.MAX_POSITION_PCT  = _orig_max_pos * 0.5
+        log.warning("VOLATILE phase: threshold+1, size×0.5, SL×1.5, no shorts")
+    elif _market_phase == "sideways":
+        # Sideways: normal params, slightly smaller size
+        config.MAX_POSITION_PCT  = _orig_max_pos * 0.8
+        log.info("SIDEWAYS phase: size×0.8, standard threshold")
+    else:
+        # Bull: full params as configured
+        log.info("BULL phase: full params active")
+
     if macro_day:
-        config.SIGNAL_THRESHOLD = max(config.SIGNAL_THRESHOLD, config.SIGNAL_THRESHOLD + 1)
+        config.SIGNAL_THRESHOLD = max(config.SIGNAL_THRESHOLD, _orig_threshold + 1)
+    # ───────────────────────────────────────────────────────────────────────────
+
     try:
         for symbol in watchlist:
             try:
@@ -911,7 +954,10 @@ def run_once() -> None:
             except Exception as exc:
                 log.error("%s: error during tick - %s", symbol, exc, exc_info=True)
     finally:
-        config.SIGNAL_THRESHOLD = _orig_threshold
+        config.SIGNAL_THRESHOLD  = _orig_threshold
+        config.ALLOW_SHORT       = _orig_allow_short
+        config.SL_ATR_MULT       = _orig_sl_atr_mult
+        config.MAX_POSITION_PCT  = _orig_max_pos
 
     log.info("=== Tick end ===\n")
 

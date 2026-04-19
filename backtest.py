@@ -351,7 +351,9 @@ def _surrogate_agent_decision(
         if sig_name == "buy" and raw_score < -(threshold + 1) and regime_conf >= 0.5:
             approved = False
 
-    size_multiplier = 1.0 + min(0.5, 0.12 * max(0, abs_score - threshold + 1) + 0.2 * regime_conf)
+    # 0.07 per score level above threshold — was 0.12, which hit max size at barely-threshold+3.
+    # New: score must be 7+ above threshold to reach 1.5× cap — reserved for genuine outliers.
+    size_multiplier = 1.0 + min(0.5, 0.07 * max(0, abs_score - threshold + 1) + 0.2 * regime_conf)
     if macro_day:
         size_multiplier -= 0.10
     if sig_name == "buy" and sentiment > 0:
@@ -1015,8 +1017,9 @@ def _simulate(
                     active_stop_pct = min(active_stop_pct, max(0.0, entry_px / trail_anchor_px - 1.0))
 
             bars_held += 1
-            # Suppress trailing-stop exits during minimum holding period to avoid noise-whipsaws.
-            _sl_for_check = active_stop_pct if bars_held > _MIN_HOLD_BARS else initial_stop_pct * 0.5
+            # During minimum hold period: use initial_stop_pct (wide protective stop) not active_stop_pct.
+            # active_stop_pct may be narrowed by breakeven logic; initial_stop_pct is the entry-time stop.
+            _sl_for_check = active_stop_pct if bars_held > _MIN_HOLD_BARS else initial_stop_pct
             exit_on_bar = _check_bar_exit(
                 entry_px,
                 trail_anchor_px,
@@ -1196,6 +1199,38 @@ def _simulate(
                     # Widen trailing stop after partial — let remaining position ride the trend.
                     active_stop_pct = trail_stop_pct
 
+        elif position_side == "short" and position_qty >= 2 and not partial_done and active_stop_pct > 0:
+            # Symmetric partial profit for shorts at 2R below entry (price fell 2× stop distance).
+            partial_target = entry_px * (1 - 2.0 * active_stop_pct)
+            if price <= partial_target:
+                position_before_exit = position_qty
+                partial_qty = float(max(1.0, round(position_qty * 0.5, 0)))
+                if partial_qty < position_qty:
+                    fill_partial = _apply_slippage(price, "buy", slippage_bps, bar=bar, qty=partial_qty)
+                    cash -= partial_qty * fill_partial + fee_per_trade  # cover: buy back short
+                    trade_fees, entry_fee_remaining = _allocate_trade_fees(
+                        entry_fee_remaining=entry_fee_remaining,
+                        exit_fee=fee_per_trade,
+                        qty_exiting=partial_qty,
+                        position_qty_before_exit=position_before_exit,
+                    )
+                    trades.append(
+                        _make_trade(
+                            symbol=symbol,
+                            entry_px=entry_px,
+                            exit_px=fill_partial,
+                            qty=partial_qty,
+                            entry_date=entry_date,
+                            exit_date=ts,
+                            exit_reason="partial_profit",
+                            fees=trade_fees,
+                            side="short",
+                        )
+                    )
+                    position_qty -= partial_qty
+                    partial_done = True
+                    active_stop_pct = trail_stop_pct
+
         if position_side == "long" and signal == "sell":
             agent_result = _surrogate_agent_decision(sig, threshold_value, for_exit=True)
             if agent_result["approved"]:
@@ -1282,14 +1317,35 @@ def _simulate(
             wants_short = signal == "sell"
             if wants_short and not config.ALLOW_SHORT:
                 signal = "hold"
-            # Shorts require stronger confirmation: SPY must be bearish OR score very strong.
-            # Prevents shorting bull-market dips (false signals from lagging indicators).
+            # Shorts require very strong confirmation on intraday TFs (noisy signals).
+            # Daily shorts are reliable (1-3 per year); intraday shorts need extreme scores.
             if wants_short and signal == "sell":
                 _bar_mt = int(sig.get("market_trend") or 0)
                 _bar_score = int(sig.get("score") or 0)
-                _short_ok = _bar_mt == -1 or _bar_score <= -(threshold_value + 2)
+                _is_intraday_tf = timeframe not in ("1Day",)
+                if _is_intraday_tf:
+                    # Intraday shorts disabled: 15Min/5Min indicators too noisy for short-side.
+                    # Daily short signals are reliable; intraday is long-only tactical.
+                    _short_ok = False
+                else:
+                    # Daily: require SPY bearish AND strong score — dual confirmation.
+                    # This limits shorts to confirmed bear regimes with real momentum.
+                    _short_ok = _bar_mt == -1 and _bar_score <= -(threshold_value + 1)
                 if not _short_ok:
                     signal = "hold"
+            if signal in ("buy", "sell") and config.ENABLE_REGIME_SWITCHING:
+                # Regime threshold offset: bear/vol raise bar for entries
+                _rp_pre = strategy.regime_params(
+                    regime=str(sig.get("regime") or "range"),
+                    market_trend=int(sig.get("market_trend") or 0),
+                    realized_vol=float(sig.get("regime_realized_vol") or 0.0),
+                )
+                _regime_thresh_offset = int(_rp_pre.get("threshold_offset", 0))
+                if _regime_thresh_offset > 0:
+                    _regime_score = int(sig.get("score") or 0)
+                    _effective_thresh = threshold_value + _regime_thresh_offset
+                    if not (_regime_score >= _effective_thresh or _regime_score <= -_effective_thresh):
+                        signal = "hold"
             if signal in ("buy", "sell"):
                 agent_result = _surrogate_agent_decision(sig, threshold_value)
                 if agent_result["approved"]:
@@ -1309,7 +1365,16 @@ def _simulate(
                         risk_manager=risk_manager,
                     )
                     if ok:
-                        qty = float(max(1.0, round(base_qty * agent_result["size_multiplier"], 0)))
+                        # ── Regime-adaptive profile (before cash deduction) ──
+                        _rp = strategy.regime_params(
+                            regime=str(sig.get("regime") or "range"),
+                            market_trend=int(sig.get("market_trend") or 0),
+                            realized_vol=float(sig.get("regime_realized_vol") or 0.0),
+                        ) if config.ENABLE_REGIME_SWITCHING else {}
+                        _sl_factor   = float(_rp.get("sl_mult_factor", 1.0))
+                        _size_factor = float(_rp.get("size_factor", 1.0))
+                        # ────────────────────────────────────────────────────
+                        qty = float(max(1.0, round(base_qty * agent_result["size_multiplier"] * _size_factor, 0)))
                         entry_side = "sell" if wants_short else "buy"
                         fill_entry_px = _apply_slippage(price, entry_side, slippage_bps, bar=bar, qty=qty)
                         required_cash = qty * fill_entry_px + fee_per_trade
@@ -1333,16 +1398,18 @@ def _simulate(
                             entry_date = ts
                             entry_fee_remaining = float(fee_per_trade)
                             _atr_val = entry_atr if entry_atr > 0 else fill_entry_px * 0.01
-                            _computed_sl = (_atr_val * sl_atr_mult) / max(fill_entry_px, 1e-9)
+                            _computed_sl = (_atr_val * sl_atr_mult * _sl_factor) / max(fill_entry_px, 1e-9)
                             _computed_tp = (_atr_val * tp_atr_mult) / max(fill_entry_px, 1e-9)
                             # Use ATR-based SL in backtest — agent override bypasses optimizer grid.
                             # Ensure minimum of 0.3% to avoid noise-stop on illiquid bars.
                             initial_stop_pct = max(0.003, _computed_sl)
                             active_stop_pct = initial_stop_pct
-                            # Adaptive trailing stop: strong signals (score≥5) use 6× initial SL
-                            # so the position rides the trend. Weak signals use 3×.
+                            # Adaptive trailing stop: strong signals (score≥5) use 2× initial SL
+                            # Optimized Apr 2026: 2× (strong) / 1× (weak) gave best Sharpe×Return
+                            # across META/GOOGL/AMZN/MSFT/QQQ/AAPL on 90d backtest.
+                            # Original: 6× (strong) / 3× (weak)
                             _sig_score = abs(int(sig.get("score") or 0))
-                            trail_stop_pct = initial_stop_pct * (6.0 if _sig_score >= 5 else 3.0)
+                            trail_stop_pct = initial_stop_pct * (2.0 if _sig_score >= 5 else 1.0)
                             active_tp_pct = _computed_tp
                             breakeven_locked = False
                             bars_held = 0
