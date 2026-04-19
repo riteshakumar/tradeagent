@@ -3,7 +3,7 @@ import time
 import plotly.graph_objects as go
 import pandas as pd
 from collections import deque
-
+import concurrent.futures
 import broker
 import strategy
 import risk
@@ -727,55 +727,47 @@ div[data-testid="stRadio"] label:has(input:checked) {
 }
 div[data-testid="stRadio"] label:has(input:checked) p { color: #ecfeff !important; }
 
-/* ── Workspace nav: tab style ───────────────────────────────────────────────── */
-.nav-tab-row div[data-testid="stRadio"] > div {
-    gap: 0;
-    flex-wrap: nowrap;
-    border-bottom: 2px solid #1e3a52;
+/* ── Workspace nav: tab-styled radio ─────────────────────────────────────────── */
+.nav-tab-wrap div[data-testid="stRadio"] > div {
+    gap: 0 !important;
+    flex-wrap: nowrap !important;
+    border-bottom: 2px solid #1a3045;
     padding-bottom: 0;
+    margin-bottom: 8px;
 }
-.nav-tab-row div[data-testid="stRadio"] label {
-    background: transparent;
-    border: none;
-    border-radius: 0;
-    border-bottom: 3px solid transparent;
-    padding: 0.45rem 1.1rem 0.4rem;
-    margin-bottom: -2px;
-    transition: color 0.15s, border-color 0.15s;
+/* Hide the radio circle indicator */
+.nav-tab-wrap div[data-testid="stRadio"] label > div:first-child {
+    display: none !important;
+}
+.nav-tab-wrap div[data-testid="stRadio"] label {
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+    border-bottom: 3px solid transparent !important;
+    padding: 0.48rem 1.1rem 0.42rem !important;
+    margin-bottom: -2px !important;
+    box-shadow: none !important;
     transform: none !important;
-}
-.nav-tab-row div[data-testid="stRadio"] label:hover {
-    border-bottom-color: #4d729a;
-    background: rgba(255,255,255,0.03);
-    transform: none !important;
-}
-.nav-tab-row div[data-testid="stRadio"] label p {
-    font-size: 0.82rem !important;
-    font-weight: 700 !important;
-    color: #7ca3c4 !important;
+    transition: color 0.15s, border-color 0.15s, background 0.15s !important;
     white-space: nowrap;
 }
-.nav-tab-row div[data-testid="stRadio"] label:has(input:checked) {
-    border-bottom: 3px solid #67e8f9;
-    background: transparent;
-    box-shadow: none;
+.nav-tab-wrap div[data-testid="stRadio"] label:hover {
+    border-bottom-color: #4d729a !important;
+    background: rgba(255,255,255,0.03) !important;
+    transform: none !important;
 }
-.nav-tab-row div[data-testid="stRadio"] label:has(input:checked) p {
-    color: #ecfeff !important;
+.nav-tab-wrap div[data-testid="stRadio"] label p {
+    font-size: 0.82rem !important;
+    font-weight: 700 !important;
+    color: #4e7a99 !important;
 }
-/* Secondary row (panels): slightly smaller, accent color */
-.nav-tab-row--secondary div[data-testid="stRadio"] > div {
-    border-bottom-color: #162333;
+.nav-tab-wrap div[data-testid="stRadio"] label:has(input:checked) {
+    border-bottom: 3px solid #38bdf8 !important;
+    background: rgba(56,189,248,0.06) !important;
+    box-shadow: none !important;
 }
-.nav-tab-row--secondary div[data-testid="stRadio"] label:has(input:checked) {
-    border-bottom-color: #38bdf8;
-}
-.nav-tab-row--secondary div[data-testid="stRadio"] label p {
-    font-size: 0.77rem !important;
-    color: #5a8aaa !important;
-}
-.nav-tab-row--secondary div[data-testid="stRadio"] label:has(input:checked) p {
-    color: #bae6fd !important;
+.nav-tab-wrap div[data-testid="stRadio"] label:has(input:checked) p {
+    color: #e0f2fe !important;
 }
 
 [data-testid="stSelectbox"] > div > div,
@@ -1480,51 +1472,40 @@ def render_workspace_focus(panel_id: str):
         unsafe_allow_html=True,
     )
 
-_PANEL_TO_TAB = {}   # unused sentinel kept for request_workspace_panel compat
+_PANEL_TO_TAB = {}   # sentinel for compat
+
+# Flat ordered nav: lane headers as selectable items that map to their first panel
+_NAV_ITEMS = []
+for _g, _panels in _PANEL_GROUPS.items():
+    for _pid in _panels:
+        _p = next(p for p in _PANEL_META if p["id"] == _pid)
+        _NAV_ITEMS.append({"id": _pid, "label": f'{_p["icon"]} {_p["label"]}', "panel": _pid, "is_lane": False})
+_NAV_IDS    = [n["id"]    for n in _NAV_ITEMS]
+_NAV_LABELS = [n["label"] for n in _NAV_ITEMS]
+_NAV_PANEL  = {n["id"]: n["panel"] for n in _NAV_ITEMS}
 
 
 def render_panel_nav(active_panel_id: str) -> str:
     panel_ids = [p["id"] for p in _PANEL_META]
-    panel_lookup = {p["id"]: p for p in _PANEL_META}
     if active_panel_id not in panel_ids:
         active_panel_id = "overview"
-    if "workspace_panel_nav" not in st.session_state or st.session_state["workspace_panel_nav"] not in panel_ids:
+    if "workspace_panel_nav" not in st.session_state or st.session_state["workspace_panel_nav"] not in _NAV_IDS:
         st.session_state["workspace_panel_nav"] = active_panel_id
-    if "workspace_panel_group" not in st.session_state:
-        st.session_state["workspace_panel_group"] = _group_for_panel(st.session_state["workspace_panel_nav"])
 
-    group_names = list(_PANEL_GROUPS.keys())
-    if st.session_state["workspace_panel_group"] not in group_names:
-        st.session_state["workspace_panel_group"] = group_names[0]
-
-    lane_icons = {"Trade Desk": "◈", "Research": "◬", "Setup": "◫"}
-    st.markdown('<div class="nav-tab-row" id="nav-lane-row">', unsafe_allow_html=True)
-    group_choice = st.radio(
-        "Lane",
-        group_names,
-        horizontal=True,
-        key="workspace_panel_group",
-        label_visibility="collapsed",
-        format_func=lambda g: f'{lane_icons.get(g, "◉")} {g}',
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    group_panels = _PANEL_GROUPS[group_choice]
-    current_panel = st.session_state.get("workspace_panel_nav", active_panel_id)
-    if current_panel not in group_panels:
-        st.session_state["workspace_panel_nav"] = group_panels[0]
-
-    st.markdown('<div class="nav-tab-row nav-tab-row--secondary">', unsafe_allow_html=True)
-    selected_id = st.radio(
-        "Workspace panel",
-        group_panels,
+    st.markdown('<div class="nav-tab-wrap">', unsafe_allow_html=True)
+    selected = st.radio(
+        "nav",
+        _NAV_IDS,
+        index=_NAV_IDS.index(st.session_state["workspace_panel_nav"]) if st.session_state["workspace_panel_nav"] in _NAV_IDS else 0,
+        format_func=lambda x: _NAV_LABELS[_NAV_IDS.index(x)],
         horizontal=True,
         label_visibility="collapsed",
         key="workspace_panel_nav",
-        format_func=lambda pid: f'{panel_lookup[pid]["icon"]} {panel_lookup[pid]["label"]}',
     )
     st.markdown('</div>', unsafe_allow_html=True)
-    return selected_id
+
+    # Lane header selected → resolve to its first panel
+    return _NAV_PANEL.get(selected, selected)
 
 def request_workspace_panel(panel_id: str, rerun_now: bool = True):
     if panel_id not in _PANEL_BY_ID:
@@ -2030,33 +2011,60 @@ def _auto_refresh_pulse():
 def build_signal_snapshot(watchlist, bar_timeframe, run_agent: bool = False):
     signal_cache = {}
     signal_rows = []
+    
     with st.spinner("Computing signals..."):
-        for symbol in watchlist:
+        # Parallel fetch bars for all symbols
+        bars_dict = {}
+        errors = {}
+        def bars_task(symbol):
             try:
                 bars = _get_bars_cached(symbol, timeframe=bar_timeframe)
-                sig = strategy.compute_signals(bars, timeframe=bar_timeframe)
-                signal_cache[symbol] = sig
-
-                agent_val = "—"
-                if run_agent and config.USE_AGENT and sig["signal"] != "hold":
-                    try:
-                        _res = agent.evaluate_signal(symbol, sig)
-                        agent_val = f"approved:{_res['reason'][:40]}" if _res["approved"] else f"rejected:{_res['reason'][:40]}"
-                    except Exception:
-                        agent_val = "—"
-
-                signal_rows.append({
-                    "Symbol": symbol,
-                    "Price": f"${sig['price']:,.2f}" if sig["price"] else "—",
-                    "Signal": sig["signal"].upper(),
-                    "Score": sig["score"],
-                    "Regime": str(sig.get("regime", "range")).replace("_", " ").title(),
-                    "RSI": sig["rsi"] if sig["rsi"] else "—",
-                    "ATR": f"{sig['atr']:.3f}" if sig.get("atr") else "—",
-                    "Reason": sig["reason"],
-                    **({"Agent": agent_val} if run_agent else {}),
-                })
+                return symbol, bars, None
             except Exception as e:
+                return symbol, None, str(e)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(watchlist))) as executor:
+            futures = {executor.submit(bars_task, symbol): symbol for symbol in watchlist}
+            for future in concurrent.futures.as_completed(futures):
+                symbol, bars, err = future.result()
+                if err:
+                    errors[symbol] = err
+                else:
+                    bars_dict[symbol] = bars
+
+        # Compute signals (serial, as before)
+        sig_dict = {}
+        for symbol in watchlist:
+            if symbol in bars_dict:
+                try:
+                    sig = strategy.compute_signals(bars_dict[symbol], timeframe=bar_timeframe)
+                    sig_dict[symbol] = sig
+                    signal_cache[symbol] = sig
+                except Exception as e:
+                    errors[symbol] = str(e)
+
+        # Parallelize agent calls if needed
+        agent_results = {}
+        if run_agent and config.USE_AGENT:
+            def agent_task(symbol):
+                sig = sig_dict.get(symbol)
+                if not sig or sig["signal"] == "hold":
+                    return symbol, "—"
+                try:
+                    _res = agent.evaluate_signal(symbol, sig)
+                    return symbol, f"approved:{_res['reason'][:40]}" if _res["approved"] else f"rejected:{_res['reason'][:40]}"
+                except Exception:
+                    return symbol, "—"
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(watchlist))) as executor:
+                futures = {executor.submit(agent_task, symbol): symbol for symbol in watchlist}
+                for future in concurrent.futures.as_completed(futures):
+                    symbol, agent_val = future.result()
+                    agent_results[symbol] = agent_val
+
+        # Assemble signal_rows
+        for symbol in watchlist:
+            if symbol in errors:
                 signal_rows.append({
                     "Symbol": symbol,
                     "Price": "—",
@@ -2065,9 +2073,25 @@ def build_signal_snapshot(watchlist, bar_timeframe, run_agent: bool = False):
                     "Regime": "—",
                     "RSI": "—",
                     "ATR": "—",
-                    "Reason": str(e),
+                    "Reason": errors[symbol],
                     **({"Agent": "—"} if run_agent else {}),
                 })
+            else:
+                sig = sig_dict[symbol]
+                agent_val = agent_results.get(symbol, "—") if run_agent and config.USE_AGENT else None
+                row = {
+                    "Symbol": symbol,
+                    "Price": f"${sig['price']:,.2f}" if sig["price"] else "—",
+                    "Signal": sig["signal"].upper(),
+                    "Score": sig["score"],
+                    "Regime": str(sig.get("regime", "range")).replace("_", " ").title(),
+                    "RSI": sig["rsi"] if sig["rsi"] else "—",
+                    "ATR": f"{sig['atr']:.3f}" if sig.get("atr") else "—",
+                    "Reason": sig["reason"],
+                }
+                if run_agent:
+                    row["Agent"] = agent_val
+                signal_rows.append(row)
     return signal_cache, signal_rows
 
 
@@ -2162,7 +2186,6 @@ def render_control_deck(sidebar_mode: bool = False):
 
     section("Trading controls", "#38bdf8")
     if sidebar_mode:
-        st.markdown('<div class="workspace-subnote">Core controls first. Advanced risk and event switches below.</div>', unsafe_allow_html=True)
         _controls_root = st.container()
     else:
         _controls_root = st.expander("Open controls", expanded=False)
@@ -2658,7 +2681,6 @@ render_context_rail(
     watchlist,
     bar_timeframe,
 )
-render_command_bar(active_panel_id)
 
 
 def render_overview_panel():
