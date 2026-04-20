@@ -1347,6 +1347,7 @@ def _simulate(
                     regime=str(sig.get("regime") or "range"),
                     market_trend=int(sig.get("market_trend") or 0),
                     realized_vol=float(sig.get("regime_realized_vol") or 0.0),
+                    is_crypto=broker.is_crypto(symbol),
                 )
                 _regime_thresh_offset = int(_rp_pre.get("threshold_offset", 0))
                 if _regime_thresh_offset > 0:
@@ -1378,6 +1379,7 @@ def _simulate(
                             regime=str(sig.get("regime") or "range"),
                             market_trend=int(sig.get("market_trend") or 0),
                             realized_vol=float(sig.get("regime_realized_vol") or 0.0),
+                            is_crypto=broker.is_crypto(symbol),
                         ) if config.ENABLE_REGIME_SWITCHING else {}
                         _sl_factor   = float(_rp.get("sl_mult_factor", 1.0))
                         _size_factor = float(_rp.get("size_factor", 1.0))
@@ -1390,9 +1392,13 @@ def _simulate(
                             cash += qty * fill_entry_px - fee_per_trade
                         else:
                             if required_cash > cash:
-                                qty = float(max(0.0, np.floor((cash - fee_per_trade) / max(fill_entry_px, 1e-9))))
-                                if qty < 1:
-                                    qty = 0.0
+                                _raw_qty = (cash - fee_per_trade) / max(fill_entry_px, 1e-9)
+                                if broker.is_crypto(symbol):
+                                    qty = float(max(0.0, round(_raw_qty, 6)))
+                                else:
+                                    qty = float(max(0.0, np.floor(_raw_qty)))
+                                    if qty < 1:
+                                        qty = 0.0
                             if qty > 0:
                                 fill_entry_px = _apply_slippage(price, entry_side, slippage_bps, bar=bar, qty=qty)
                                 cash -= qty * fill_entry_px + fee_per_trade
@@ -1415,9 +1421,12 @@ def _simulate(
                             # Adaptive trailing stop: strong signals (score≥5) use 2× initial SL
                             # Optimized Apr 2026: 2× (strong) / 1× (weak) gave best Sharpe×Return
                             # across META/GOOGL/AMZN/MSFT/QQQ/AAPL on 90d backtest.
-                            # Original: 6× (strong) / 3× (weak)
+                            # Crypto: 3-7% ATR-SL gets whipsawed by daily noise → use 4× / 3×
                             _sig_score = abs(int(sig.get("score") or 0))
-                            trail_stop_pct = initial_stop_pct * (2.0 if _sig_score >= 5 else 1.0)
+                            if broker.is_crypto(symbol):
+                                trail_stop_pct = initial_stop_pct * (4.0 if _sig_score >= 5 else 3.0)
+                            else:
+                                trail_stop_pct = initial_stop_pct * (2.0 if _sig_score >= 5 else 1.0)
                             active_tp_pct = _computed_tp
                             breakeven_locked = False
                             bars_held = 0
@@ -1663,8 +1672,9 @@ def run(
 
     df = _prepare_df(bar_rows)
 
-    # Pre-build SPY trend dict for market regime gate (skip SPY itself)
-    spy_trend = _build_spy_trend(timeframe, days) if symbol != "SPY" else {}
+    # Pre-build SPY trend dict for market regime gate.
+    # Skip for crypto — BTC/ETH have their own cycles, SPY bear penalty is irrelevant.
+    spy_trend = {} if (symbol == "SPY" or broker.is_crypto(symbol)) else _build_spy_trend(timeframe, days)
     filter_context = _build_filter_context(symbol, timeframe, days, df, market_trend_by_date=spy_trend)
     event_context = _build_event_context(symbol, df)
     filter_context["market_event_context"] = _build_market_event_context(df)
@@ -1682,12 +1692,17 @@ def run(
         disabled_components=filter_context.get("disabled_components"),
     )
 
+    _base_threshold = strategy._resolve_signal_threshold(timeframe, None)
+    # Crypto needs a lower bar: 24/7 market + fewer correlated signals means
+    # scores rarely reach 4. Drop to 2 for daily crypto to capture real trends.
+    if broker.is_crypto(symbol) and timeframe == "1Day":
+        _base_threshold = max(2, _base_threshold - 2)
     result = _evaluate_parameters(
         df=df,
         symbol=symbol,
         timeframe=timeframe,
         initial_cash=initial_cash,
-        threshold=strategy._resolve_signal_threshold(timeframe, None),
+        threshold=_base_threshold,
         sl_atr_mult=config.SL_ATR_MULT,
         tp_atr_mult=config.TP_ATR_MULT,
         market_trend_by_date=spy_trend,

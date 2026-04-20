@@ -1032,7 +1032,7 @@ def signal_at_index(
     }
 
 
-def regime_params(regime: str, market_trend: int, realized_vol: float = 0.0) -> dict:
+def regime_params(regime: str, market_trend: int, realized_vol: float = 0.0, is_crypto: bool = False) -> dict:
     """
     Map (stock regime, SPY trend, realized_vol) → per-bar trade profile.
 
@@ -1047,6 +1047,14 @@ def regime_params(regime: str, market_trend: int, realized_vol: float = 0.0) -> 
       - Bear params: tighter SL + smaller size to limit drawdown in downturns
       - Bull_trend params: unchanged (only 2% of bars, no measurable difference)
     """
+    # Crypto: high vol is normal — don't penalise size/threshold, just widen stop
+    if is_crypto:
+        if regime == "bear_trend":
+            return {"sl_mult_factor": 2.0, "size_factor": 0.7, "threshold_offset": 0, "allow_short": False}
+        if regime == "bull_trend":
+            return {"sl_mult_factor": 2.0, "size_factor": 1.0, "threshold_offset": 0, "allow_short": False}
+        return {"sl_mult_factor": 2.0, "size_factor": 0.9, "threshold_offset": 0, "allow_short": False}
+
     # High-volatility regime: widen stop to absorb noise, cut size, raise bar
     if regime == "high_volatility" or realized_vol > 0.025:
         return {"sl_mult_factor": 1.5, "size_factor": 0.5, "threshold_offset": 1, "allow_short": False}
