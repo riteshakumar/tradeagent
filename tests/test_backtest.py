@@ -60,27 +60,19 @@ def test_simulate_applies_take_profit(monkeypatch):
         rows.append({"t": start + timedelta(days=i), "o": close, "h": high, "l": low, "c": close, "v": 1_000_000})
     df = pd.DataFrame(rows)
 
-    def _always_buy(
-        _bars: list[dict],
-        market_trend: int = 0,
-        earnings_soon: bool = False,
-        threshold: int | None = None,
-        timeframe: str | None = None,
-    ) -> dict:
+    def _always_buy(idx, pre, market_trend=0, earnings_soon=False, threshold=None, **kwargs):
         return {
             "signal": "buy",
             "score": 10,
             "reason": "forced",
-            "rsi": 50,
-            "price": 100,
-            "atr": 1,
-            "event_score": 0,
-            "event_reasons": [],
+            "atr": 1.0,
             "regime": "bull_trend",
             "regime_confidence": 1.0,
+            "regime_realized_vol": 0.0,
+            "market_trend": market_trend,
         }
 
-    monkeypatch.setattr(backtest.strategy, "compute_signals", _always_buy)
+    monkeypatch.setattr(backtest.strategy, "signal_at_index", _always_buy)
 
     trades, _, _ = backtest._simulate(
         df=df,
@@ -88,8 +80,8 @@ def test_simulate_applies_take_profit(monkeypatch):
         timeframe="1Day",
         initial_cash=100_000,
         threshold=3,
-        stop_loss_pct=0.05,
-        take_profit_pct=0.05,
+        sl_atr_mult=5.0,
+        tp_atr_mult=5.0,
         slippage_bps=0.0,
         fee_per_trade=0.0,
     )
@@ -105,27 +97,20 @@ def test_simulate_respects_strategy_signal_over_raw_score(monkeypatch):
         rows.append({"t": start + timedelta(days=i), "o": 100.0, "h": 100.0, "l": 100.0, "c": 100.0, "v": 1_000_000})
     df = pd.DataFrame(rows)
 
-    def _gated_hold(
-        _bars: list[dict],
-        market_trend: int = 0,
-        earnings_soon: bool = False,
-        threshold: int | None = None,
-        timeframe: str | None = None,
-    ) -> dict:
+    def _gated_hold(idx, pre, market_trend=0, earnings_soon=False, threshold=None, **kwargs):
+        # score=10 but signal="hold" — gate should prevent entry regardless of score
         return {
             "signal": "hold",
             "score": 10,
             "reason": "gated",
-            "rsi": 50,
-            "price": 100,
-            "atr": 1,
-            "event_score": 0,
-            "event_reasons": [],
+            "atr": 1.0,
             "regime": "bull_trend",
             "regime_confidence": 1.0,
+            "regime_realized_vol": 0.0,
+            "market_trend": market_trend,
         }
 
-    monkeypatch.setattr(backtest.strategy, "compute_signals", _gated_hold)
+    monkeypatch.setattr(backtest.strategy, "signal_at_index", _gated_hold)
 
     trades, _, final_equity = backtest._simulate(
         df=df,
@@ -133,8 +118,8 @@ def test_simulate_respects_strategy_signal_over_raw_score(monkeypatch):
         timeframe="1Day",
         initial_cash=100_000,
         threshold=3,
-        stop_loss_pct=0.0,
-        take_profit_pct=0.0,
+        sl_atr_mult=0.0,
+        tp_atr_mult=0.0,
         slippage_bps=0.0,
         fee_per_trade=0.0,
         warmup_override=30,
@@ -171,27 +156,21 @@ def test_simulate_trailing_stop_uses_prior_peak(monkeypatch):
     rows.append({"t": start + timedelta(days=31), "o": 100.0, "h": 110.0, "l": 104.0, "c": 110.0, "v": 1_000_000})
     df = pd.DataFrame(rows)
 
-    def _always_buy(
-        _bars: list[dict],
-        market_trend: int = 0,
-        earnings_soon: bool = False,
-        threshold: int | None = None,
-        timeframe: str | None = None,
-    ) -> dict:
+    def _always_buy(idx, pre, market_trend=0, earnings_soon=False, threshold=None, **kwargs):
+        # atr=20: sl = 20 * 0.25 / 100 = 5% → stop at entry * 0.95 = 95
+        # bar31 low=104 > 95 → stop NOT hit (trailing uses initial entry price, not peak yet)
         return {
             "signal": "buy",
             "score": 10,
             "reason": "forced",
-            "rsi": 50,
-            "price": 100,
-            "atr": 20,
-            "event_score": 0,
-            "event_reasons": [],
+            "atr": 20.0,
             "regime": "bull_trend",
             "regime_confidence": 1.0,
+            "regime_realized_vol": 0.0,
+            "market_trend": market_trend,
         }
 
-    monkeypatch.setattr(backtest.strategy, "compute_signals", _always_buy)
+    monkeypatch.setattr(backtest.strategy, "signal_at_index", _always_buy)
 
     trades, _, _ = backtest._simulate(
         df=df,
@@ -199,8 +178,8 @@ def test_simulate_trailing_stop_uses_prior_peak(monkeypatch):
         timeframe="1Day",
         initial_cash=100_000,
         threshold=3,
-        stop_loss_pct=0.05,
-        take_profit_pct=0.0,
+        sl_atr_mult=0.25,
+        tp_atr_mult=0.0,
         slippage_bps=0.0,
         fee_per_trade=0.0,
         warmup_override=30,
@@ -222,27 +201,19 @@ def test_simulate_partial_exit_fee_allocation_matches_portfolio_pnl(monkeypatch)
     rows.append({"t": start + timedelta(days=31), "o": 116.0, "h": 116.0, "l": 116.0, "c": 116.0, "v": 1_000_000})
     df = pd.DataFrame(rows)
 
-    def _always_buy(
-        _bars: list[dict],
-        market_trend: int = 0,
-        earnings_soon: bool = False,
-        threshold: int | None = None,
-        timeframe: str | None = None,
-    ) -> dict:
+    def _always_buy(idx, pre, market_trend=0, earnings_soon=False, threshold=None, **kwargs):
         return {
             "signal": "buy",
             "score": 10,
             "reason": "forced",
-            "rsi": 50,
-            "price": 100,
-            "atr": 10,
-            "event_score": 0,
-            "event_reasons": [],
+            "atr": 10.0,
             "regime": "bull_trend",
             "regime_confidence": 1.0,
+            "regime_realized_vol": 0.0,
+            "market_trend": market_trend,
         }
 
-    monkeypatch.setattr(backtest.strategy, "compute_signals", _always_buy)
+    monkeypatch.setattr(backtest.strategy, "signal_at_index", _always_buy)
 
     initial_cash = 100_000
     trades, _, final_equity = backtest._simulate(
@@ -251,8 +222,8 @@ def test_simulate_partial_exit_fee_allocation_matches_portfolio_pnl(monkeypatch)
         timeframe="1Day",
         initial_cash=initial_cash,
         threshold=3,
-        stop_loss_pct=0.0,
-        take_profit_pct=0.0,
+        sl_atr_mult=0.0,
+        tp_atr_mult=0.0,
         slippage_bps=0.0,
         fee_per_trade=10.0,
         warmup_override=30,
@@ -300,27 +271,19 @@ def test_simulate_does_not_reenter_on_same_bar_after_intrabar_exit(monkeypatch):
         rows.append({"t": start + timedelta(days=i), "o": close, "h": high, "l": low, "c": close, "v": 1_000_000})
     df = pd.DataFrame(rows)
 
-    def _always_buy(
-        _bars: list[dict],
-        market_trend: int = 0,
-        earnings_soon: bool = False,
-        threshold: int | None = None,
-        timeframe: str | None = None,
-    ) -> dict:
+    def _always_buy(idx, pre, market_trend=0, earnings_soon=False, threshold=None, **kwargs):
         return {
             "signal": "buy",
             "score": 10,
             "reason": "forced",
-            "rsi": 50,
-            "price": 100,
-            "atr": 1,
-            "event_score": 0,
-            "event_reasons": [],
+            "atr": 1.0,
             "regime": "bull_trend",
             "regime_confidence": 1.0,
+            "regime_realized_vol": 0.0,
+            "market_trend": market_trend,
         }
 
-    monkeypatch.setattr(backtest.strategy, "compute_signals", _always_buy)
+    monkeypatch.setattr(backtest.strategy, "signal_at_index", _always_buy)
 
     trades, _, final_equity = backtest._simulate(
         df=df,
@@ -328,8 +291,8 @@ def test_simulate_does_not_reenter_on_same_bar_after_intrabar_exit(monkeypatch):
         timeframe="1Day",
         initial_cash=100_000,
         threshold=3,
-        stop_loss_pct=0.05,
-        take_profit_pct=0.05,
+        sl_atr_mult=5.0,
+        tp_atr_mult=5.0,
         slippage_bps=0.0,
         fee_per_trade=0.0,
     )
@@ -349,27 +312,19 @@ def test_equity_curve_includes_final_liquidation_equity(monkeypatch):
         rows.append({"t": start + timedelta(days=i), "o": close, "h": close, "l": close, "c": close, "v": 1_000_000})
     df = pd.DataFrame(rows)
 
-    def _always_buy(
-        _bars: list[dict],
-        market_trend: int = 0,
-        earnings_soon: bool = False,
-        threshold: int | None = None,
-        timeframe: str | None = None,
-    ) -> dict:
+    def _always_buy(idx, pre, market_trend=0, earnings_soon=False, threshold=None, **kwargs):
         return {
             "signal": "buy",
             "score": 10,
             "reason": "forced",
-            "rsi": 50,
-            "price": 100,
-            "atr": 1,
-            "event_score": 0,
-            "event_reasons": [],
+            "atr": 1.0,
             "regime": "bull_trend",
             "regime_confidence": 1.0,
+            "regime_realized_vol": 0.0,
+            "market_trend": market_trend,
         }
 
-    monkeypatch.setattr(backtest.strategy, "compute_signals", _always_buy)
+    monkeypatch.setattr(backtest.strategy, "signal_at_index", _always_buy)
 
     _, equity_curve, final_equity = backtest._simulate(
         df=df,
@@ -377,8 +332,8 @@ def test_equity_curve_includes_final_liquidation_equity(monkeypatch):
         timeframe="1Day",
         initial_cash=100_000,
         threshold=3,
-        stop_loss_pct=0.0,
-        take_profit_pct=0.0,
+        sl_atr_mult=0.0,
+        tp_atr_mult=0.0,
         slippage_bps=0.0,
         fee_per_trade=10.0,
     )
@@ -395,31 +350,21 @@ def test_simulate_passes_historical_earnings_period_to_strategy(monkeypatch):
     df = pd.DataFrame(rows)
     observed = {"earnings_soon": False}
 
-    def _earnings_sensitive(
-        _bars: list[dict],
-        market_trend: int = 0,
-        earnings_soon: bool = False,
-        threshold: int | None = None,
-        timeframe: str | None = None,
-    ) -> dict:
+    def _earnings_sensitive(idx, pre, market_trend=0, earnings_soon=False, threshold=None, **kwargs):
         observed["earnings_soon"] = earnings_soon
         return {
             "signal": "hold" if earnings_soon else "buy",
             "score": 10 if not earnings_soon else 0,
             "reason": "earnings gate",
-            "rsi": 50,
-            "price": 100,
-            "atr": 1,
-            "event_score": 0,
-            "event_reasons": [],
+            "atr": 1.0,
             "regime": "bull_trend",
             "regime_confidence": 1.0,
-            "timeframe": timeframe or "1Day",
+            "regime_realized_vol": 0.0,
             "market_trend": market_trend,
             "earnings_soon": earnings_soon,
         }
 
-    monkeypatch.setattr(backtest.strategy, "compute_signals", _earnings_sensitive)
+    monkeypatch.setattr(backtest.strategy, "signal_at_index", _earnings_sensitive)
 
     event_context = {
         "earnings_news": [
@@ -440,8 +385,8 @@ def test_simulate_passes_historical_earnings_period_to_strategy(monkeypatch):
         timeframe="1Day",
         initial_cash=100_000,
         threshold=3,
-        stop_loss_pct=0.0,
-        take_profit_pct=0.0,
+        sl_atr_mult=0.0,
+        tp_atr_mult=0.0,
         slippage_bps=0.0,
         fee_per_trade=0.0,
         warmup_override=30,
@@ -464,14 +409,9 @@ def test_simulate_replays_historical_event_score_without_lookahead(monkeypatch):
     ]
     df = pd.DataFrame(rows)
 
-    def _base_signal(
-        _bars: list[dict],
-        market_trend: int = 0,
-        earnings_soon: bool = False,
-        threshold: int | None = None,
-        timeframe: str | None = None,
-    ) -> dict:
-        if len(_bars) <= 30:
+    def _base_signal(idx, pre, market_trend=0, earnings_soon=False, threshold=None, **kwargs):
+        # idx <= 30 maps to first active bar (warmup_override=30); idx > 30 → hold
+        if idx <= 30:
             signal = "buy"
             score = 5
         else:
@@ -481,19 +421,15 @@ def test_simulate_replays_historical_event_score_without_lookahead(monkeypatch):
             "signal": signal,
             "score": score,
             "reason": "base",
-            "rsi": 50,
-            "price": 100,
-            "atr": 1,
-            "event_score": 0,
-            "event_reasons": [],
+            "atr": 1.0,
             "regime": "bull_trend",
             "regime_confidence": 1.0,
-            "timeframe": timeframe or "1Day",
+            "regime_realized_vol": 0.0,
             "market_trend": market_trend,
             "earnings_soon": earnings_soon,
         }
 
-    monkeypatch.setattr(backtest.strategy, "compute_signals", _base_signal)
+    monkeypatch.setattr(backtest.strategy, "signal_at_index", _base_signal)
 
     event_context = {
         "earnings_news": [
@@ -524,8 +460,8 @@ def test_simulate_replays_historical_event_score_without_lookahead(monkeypatch):
         timeframe="1Day",
         initial_cash=100_000,
         threshold=2,
-        stop_loss_pct=0.0,
-        take_profit_pct=0.0,
+        sl_atr_mult=0.0,
+        tp_atr_mult=0.0,
         slippage_bps=0.0,
         fee_per_trade=0.0,
         warmup_override=30,
@@ -551,31 +487,24 @@ def test_simulate_supports_short_entries_and_buy_covers(monkeypatch):
         rows.append({"t": start + timedelta(days=i), "o": close, "h": close, "l": close, "c": close, "v": 1_000_000})
     df = pd.DataFrame(rows)
 
-    def _short_then_cover(
-        _bars: list[dict],
-        market_trend: int = 0,
-        earnings_soon: bool = False,
-        threshold: int | None = None,
-        timeframe: str | None = None,
-    ) -> dict:
-        close = float(_bars[-1]["c"])
+    _df_ref = df  # capture for closure
+
+    def _short_then_cover(idx, pre, market_trend=0, earnings_soon=False, threshold=None, **kwargs):
+        close = float(_df_ref.iloc[idx]["c"])
         signal = "sell" if close >= 95.0 else "buy"
         score = -10 if signal == "sell" else 10
         return {
             "signal": signal,
             "score": score,
             "reason": "forced",
-            "rsi": 50,
-            "price": close,
-            "atr": 1,
-            "event_score": 0,
-            "event_reasons": [],
+            "atr": 1.0,
             "regime": "bear_trend",
             "regime_confidence": 1.0,
             "regime_realized_vol": 0.0,
+            "market_trend": -1,  # must be -1 for daily shorts to pass the gate
         }
 
-    monkeypatch.setattr(backtest.strategy, "compute_signals", _short_then_cover)
+    monkeypatch.setattr(backtest.strategy, "signal_at_index", _short_then_cover)
 
     trades, _, _ = backtest._simulate(
         df=df,
@@ -583,8 +512,8 @@ def test_simulate_supports_short_entries_and_buy_covers(monkeypatch):
         timeframe="1Day",
         initial_cash=100_000,
         threshold=3,
-        stop_loss_pct=0.0,
-        take_profit_pct=0.0,
+        sl_atr_mult=10.0,  # wide stop (10% @ atr=1) keeps partial_profit target far
+        tp_atr_mult=0.0,
         slippage_bps=0.0,
         fee_per_trade=0.0,
         warmup_override=20,
@@ -676,12 +605,13 @@ def test_ablation_report_records_component_deltas(monkeypatch):
         timeframe,
         initial_cash,
         threshold,
-        stop_loss_pct,
-        take_profit_pct,
+        sl_atr_mult=1.0,
+        tp_atr_mult=0.0,
         market_trend_by_date=None,
         filter_context=None,
         event_context=None,
         warmup_override=None,
+        **kwargs,
     ):
         disabled = (filter_context or {}).get("disabled_components")
         if disabled == {"ema"}:
@@ -706,18 +636,19 @@ def test_select_training_parameters_respects_trade_floor(monkeypatch):
         timeframe,
         initial_cash,
         threshold,
-        stop_loss_pct,
-        take_profit_pct,
+        sl_atr_mult=1.0,
+        tp_atr_mult=0.0,
         market_trend_by_date=None,
         filter_context=None,
         event_context=None,
         warmup_override=None,
+        **kwargs,
     ):
         if threshold == 2:
             return {
                 "threshold": threshold,
-                "stop_loss_pct": stop_loss_pct,
-                "take_profit_pct": take_profit_pct,
+                "sl_atr_mult": sl_atr_mult,
+                "tp_atr_mult": tp_atr_mult,
                 "trades": 1,
                 "sharpe": 99.0,
                 "total_return_pct": 50.0,
@@ -725,8 +656,8 @@ def test_select_training_parameters_respects_trade_floor(monkeypatch):
             }
         return {
             "threshold": threshold,
-            "stop_loss_pct": stop_loss_pct,
-            "take_profit_pct": take_profit_pct,
+            "sl_atr_mult": sl_atr_mult,
+            "tp_atr_mult": tp_atr_mult,
             "trades": 8,
             "sharpe": 1.0,
             "total_return_pct": 5.0,
@@ -760,12 +691,13 @@ def test_optimize_ranks_on_validation_not_training(monkeypatch):
         timeframe,
         initial_cash,
         threshold,
-        stop_loss_pct,
-        take_profit_pct,
+        sl_atr_mult=1.0,
+        tp_atr_mult=0.0,
         market_trend_by_date=None,
         filter_context=None,
         event_context=None,
         warmup_override=None,
+        **kwargs,
     ):
         if warmup_override is None:
             train_by_threshold = {
@@ -774,8 +706,8 @@ def test_optimize_ranks_on_validation_not_training(monkeypatch):
             }
             return {
                 "threshold": threshold,
-                "stop_loss_pct": stop_loss_pct,
-                "take_profit_pct": take_profit_pct,
+                "sl_atr_mult": sl_atr_mult,
+                "tp_atr_mult": tp_atr_mult,
                 **train_by_threshold[threshold],
             }
 
@@ -785,8 +717,8 @@ def test_optimize_ranks_on_validation_not_training(monkeypatch):
         }
         return {
             "threshold": threshold,
-            "stop_loss_pct": stop_loss_pct,
-            "take_profit_pct": take_profit_pct,
+            "sl_atr_mult": sl_atr_mult,
+            "tp_atr_mult": tp_atr_mult,
             **validation_by_threshold[threshold],
         }
 

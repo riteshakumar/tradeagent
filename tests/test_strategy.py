@@ -67,10 +67,11 @@ def test_apply_event_score_preserves_regime_keys(monkeypatch):
 
 
 def test_apply_event_score_honors_timeframe_threshold(monkeypatch):
+    # SIGNAL_THRESHOLD=4, 5Min offset=0 → threshold=4. score=1+event=2=3 < 4 → hold
     monkeypatch.setattr(config, "SIGNAL_THRESHOLD", 4)
     quant = {
         "signal": "hold",
-        "score": 2,
+        "score": 1,
         "reason": "base",
         "regime": "range",
         "regime_confidence": 0.5,
@@ -113,9 +114,12 @@ def test_compute_signals_honors_threshold_override(monkeypatch):
     monkeypatch.setattr(config, "ENABLE_REGIME_SWITCHING", False)
 
     def _stub_components(_close, _volume, _df, timeframe="1Day", is_intraday=False):
+        # Two bullish + one bearish: agree check passes (bullish>=2), weighted_score=1.
+        # 1Day threshold = SIGNAL_THRESHOLD-1 = 2; score=1 < 2 → hold.
+        # With explicit threshold=1 override: score=1 >= 1 → buy.
         return (
-            {"ema": 1},
-            {"ema": "stub"},
+            {"ema": 1, "rsi": 1, "macd": -1},
+            {"ema": "stub", "rsi": "stub", "macd": "stub"},
             {"regime": "bull_trend", "confidence": 1.0, "trend_strength": 1.0, "realized_vol": 0.0},
             30.0,
         )
@@ -202,12 +206,12 @@ def test_disable_regime_switching_disables_adx_mode_switch(monkeypatch):
 
     monkeypatch.setattr(strategy, "_adx", lambda _df, period=14: pd.Series([30.0] * len(_df), index=_df.index))
     monkeypatch.setattr(strategy, "_rsi_score", lambda rsi, prev_rsi=None: (2, "rsi"))
-    monkeypatch.setattr(strategy, "_bb_score", lambda price, upper, lower, bb_width_pct=None: (2, "bb"))
+    monkeypatch.setattr(strategy, "_bb_score", lambda *args, **kwargs: (2, "bb"))
     monkeypatch.setattr(strategy, "_macd_score", lambda *args: (0, ""))
     monkeypatch.setattr(strategy, "_ema_score", lambda *args: (0, ""))
     monkeypatch.setattr(strategy, "_supertrend_score", lambda *args: (0, ""))
     monkeypatch.setattr(strategy, "_breakout_score", lambda *args: (0, ""))
-    monkeypatch.setattr(strategy, "_momentum_score", lambda *args: (0, ""))
+    monkeypatch.setattr(strategy, "_momentum_score", lambda *args, **kwargs: (0, ""))
     monkeypatch.setattr(strategy, "_volume_score", lambda volume, current_score: (0, ""))
 
     monkeypatch.setattr(config, "ENABLE_REGIME_SWITCHING", True)
