@@ -186,6 +186,7 @@ def compute_qty(
     account: dict,
     atr: float | None = None,
     realized_vol: float | None = None,
+    symbol: str = "",
 ) -> float:
     """
     Volatility-adjusted position sizing.
@@ -226,6 +227,9 @@ def compute_qty(
     else:
         qty = max_dollars / price
 
+    # Crypto: fractional to 6dp, min 0.000001. Equities: whole shares, min 1.
+    if "/" in symbol:
+        return max(0.000001, round(qty, 6))
     return max(1.0, round(qty, 0))
 
 
@@ -386,7 +390,9 @@ def pre_trade_checks(
     if not check_cooldown(symbol):
         return False, f"cooldown active for {symbol}"
 
-    if not check_position_size(price, account):
+    # Crypto is fractional — skip per-unit price cap (BTC at $90k is valid)
+    _is_crypto = "/" in symbol
+    if not _is_crypto and not check_position_size(price, account):
         return False, f"share price ${price:,.2f} exceeds max position size"
 
     drawdown_state = evaluate_drawdown(account)
@@ -397,7 +403,7 @@ def pre_trade_checks(
     if daily_state["halted"]:
         return False, f"daily loss stop active ({daily_state['daily_loss_pct']*100:.2f}%)"
 
-    qty = compute_qty(price, account, atr=atr)
+    qty = compute_qty(price, account, atr=atr, symbol=symbol)
     if not check_buying_power(price, qty, account):
         return False, f"insufficient buying power (need ${price * qty:,.2f})"
 

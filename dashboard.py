@@ -2138,7 +2138,7 @@ def render_screener_snapshot(watch_source, top_n):
 def render_control_deck(sidebar_mode: bool = False):
     _saved_settings = settings_store.load()
     top_n = 10
-    _ws_options = ["my_list", "trending", "most_active", "gainers", "losers", "sector", "etf"]
+    _ws_options = ["my_list", "trending", "most_active", "gainers", "losers", "sector", "etf", "crypto"]
     _ws_saved = settings_store.get("watch_source", "my_list")
     if _ws_saved not in _ws_options:
         _ws_saved = "my_list"
@@ -2204,6 +2204,7 @@ def render_control_deck(sidebar_mode: bool = False):
                     "losers": "Top Losers",
                     "sector": "Sector + ETF",
                     "etf": "ETF Themes",
+                    "crypto": "Crypto",
                 }[x],
             )
             if watch_source != _ws_saved:
@@ -2232,6 +2233,15 @@ def render_control_deck(sidebar_mode: bool = False):
                     key="etf_themes_pick",
                 )
                 watchlist = screener.build_watchlist(watch_source, etf_themes=etf_themes or None)
+            elif watch_source == "crypto":
+                crypto_cats = st.multiselect(
+                    "Categories",
+                    options=list(screener.CRYPTO_UNIVERSE.keys()),
+                    default=["Major"],
+                    key="crypto_cats_pick",
+                )
+                watchlist = screener.build_watchlist("crypto", crypto_categories=crypto_cats or None)
+                st.caption(f"{len(watchlist)} pairs · e.g. {', '.join(watchlist[:3])}")
             elif watch_source == "sector":
                 _all_sectors = sorted(screener.SECTOR_UNIVERSE.keys())
                 _sel_sectors = st.multiselect(

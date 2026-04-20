@@ -27,6 +27,13 @@ _BT_LOOKBACK = {
     "1Day": 365,  # 1 year
 }
 
+
+def _round_qty(qty: float, symbol: str) -> float:
+    """Crypto: fractional to 6dp, min 0.000001. Equities: whole shares, min 1."""
+    if broker.is_crypto(symbol):
+        return max(0.000001, round(qty, 6))
+    return max(1.0, round(qty, 0))
+
 _ANNUALIZATION_PERIODS = {
     "1Min": 252 * 390,
     "5Min": 252 * 78,
@@ -283,7 +290,8 @@ def _backtest_pre_trade_checks(
         if elapsed < float(config.ORDER_COOLDOWN_SEC):
             return False, "cooldown active", 0.0
 
-    if not risk.check_position_size(price, account):
+    # Crypto uses fractional qty — price-per-unit check is irrelevant (BTC at $90k is fine)
+    if not broker.is_crypto(symbol) and not risk.check_position_size(price, account):
         return False, "share price exceeds max position size", 0.0
     if not risk.check_cash_buffer(account):
         return False, "cash below reserve buffer", 0.0
@@ -295,7 +303,7 @@ def _backtest_pre_trade_checks(
         if daily_state["halted"]:
             return False, "daily loss stop active", 0.0
 
-    qty = risk.compute_qty(price, account, atr=atr, realized_vol=realized_vol)
+    qty = risk.compute_qty(price, account, atr=atr, realized_vol=realized_vol, symbol=symbol)
     if qty <= 0:
         return False, "qty resolved to zero", 0.0
     # Shorts receive cash at entry (proceeds) — no upfront cost, skip buying_power check.
@@ -1171,7 +1179,7 @@ def _simulate(
             partial_target = entry_px * (1 + 2.0 * active_stop_pct)
             if price >= partial_target:
                 position_before_exit = position_qty
-                partial_qty = float(max(1.0, round(position_qty * 0.5, 0)))
+                partial_qty = float(_round_qty(position_qty * 0.5, symbol))
                 if partial_qty < position_qty:
                     fill_partial = _apply_slippage(price, "sell", slippage_bps, bar=bar, qty=partial_qty)
                     cash += partial_qty * fill_partial - fee_per_trade
@@ -1204,7 +1212,7 @@ def _simulate(
             partial_target = entry_px * (1 - 2.0 * active_stop_pct)
             if price <= partial_target:
                 position_before_exit = position_qty
-                partial_qty = float(max(1.0, round(position_qty * 0.5, 0)))
+                partial_qty = float(_round_qty(position_qty * 0.5, symbol))
                 if partial_qty < position_qty:
                     fill_partial = _apply_slippage(price, "buy", slippage_bps, bar=bar, qty=partial_qty)
                     cash -= partial_qty * fill_partial + fee_per_trade  # cover: buy back short
@@ -1374,7 +1382,7 @@ def _simulate(
                         _sl_factor   = float(_rp.get("sl_mult_factor", 1.0))
                         _size_factor = float(_rp.get("size_factor", 1.0))
                         # ────────────────────────────────────────────────────
-                        qty = float(max(1.0, round(base_qty * agent_result["size_multiplier"] * _size_factor, 0)))
+                        qty = float(_round_qty(base_qty * agent_result["size_multiplier"] * _size_factor, symbol))
                         entry_side = "sell" if wants_short else "buy"
                         fill_entry_px = _apply_slippage(price, entry_side, slippage_bps, bar=bar, qty=qty)
                         required_cash = qty * fill_entry_px + fee_per_trade
@@ -2357,7 +2365,7 @@ def run_portfolio(
         if state["side"] == "long" and state["qty"] >= 2 and not state["partial_done"] and state["active_stop_pct"] > 0:
             partial_target = state["entry_px"] * (1 + 2.0 * state["active_stop_pct"])
             if price >= partial_target:
-                partial_qty = float(max(1.0, round(state["qty"] * 0.5, 0)))
+                partial_qty = float(_round_qty(state["qty"] * 0.5, symbol))
                 if partial_qty < state["qty"]:
                     fill_partial = _apply_slippage(price, "sell", config.BACKTEST_SLIPPAGE_BPS, bar=bar, qty=partial_qty)
                     cash += partial_qty * fill_partial - config.BACKTEST_FEE_PER_TRADE
@@ -2488,7 +2496,7 @@ def run_portfolio(
                         risk_manager=risk_manager,
                     )
                     if ok:
-                        qty = float(max(1.0, round(base_qty * agent_result["size_multiplier"], 0)))
+                        qty = float(_round_qty(base_qty * agent_result["size_multiplier"], symbol))
                         entry_side = "sell" if wants_short else "buy"
                         fill_entry_px = _apply_slippage(price, entry_side, config.BACKTEST_SLIPPAGE_BPS, bar=bar, qty=qty)
                         required_cash = qty * fill_entry_px + config.BACKTEST_FEE_PER_TRADE

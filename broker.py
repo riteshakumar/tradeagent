@@ -1,8 +1,8 @@
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from datetime import datetime, timedelta
 import logging
@@ -16,6 +16,11 @@ log = logging.getLogger(__name__)
 
 _trading = TradingClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY, paper=config.PAPER_TRADING)
 _data = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
+_crypto_data = CryptoHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
+
+
+def is_crypto(symbol: str) -> bool:
+    return "/" in symbol
 
 # Map config string → (TimeFrame, lookback timedelta)
 _TIMEFRAME_MAP = {
@@ -75,12 +80,13 @@ def get_bars(symbol: str, timeframe: str | None = None, lookback_days: int | Non
     tf_key = timeframe or config.BAR_TIMEFRAME
     tf, default_lookback = _TIMEFRAME_MAP.get(tf_key, _TIMEFRAME_MAP["5Min"])
     lookback = timedelta(days=lookback_days) if lookback_days else default_lookback
-    req = StockBarsRequest(
-        symbol_or_symbols=symbol,
-        timeframe=tf,
-        start=datetime.now() - lookback,
-    )
-    bars = _data.get_stock_bars(req)[symbol]
+    start = datetime.now() - lookback
+    if is_crypto(symbol):
+        req = CryptoBarsRequest(symbol_or_symbols=symbol, timeframe=tf, start=start)
+        bars = _crypto_data.get_crypto_bars(req)[symbol]
+    else:
+        req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=tf, start=start)
+        bars = _data.get_stock_bars(req)[symbol]
     return [
         {"t": b.timestamp.isoformat(), "o": b.open, "h": b.high, "l": b.low, "c": b.close, "v": b.volume}
         for b in bars
@@ -89,11 +95,13 @@ def get_bars(symbol: str, timeframe: str | None = None, lookback_days: int | Non
 
 def place_market_order(symbol: str, qty: float, side: str) -> dict:
     # No retry — retrying order submission risks double-fills.
+    # Crypto markets are 24/7 → use GTC; equities → DAY.
+    tif = TimeInForce.GTC if is_crypto(symbol) else TimeInForce.DAY
     req = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
         side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-        time_in_force=TimeInForce.DAY,
+        time_in_force=tif,
     )
     order = _trading.submit_order(req)
     return {"id": str(order.id), "symbol": symbol, "qty": qty, "side": side, "status": str(order.status)}

@@ -40,6 +40,16 @@ SECTOR_STOCKS = {
     "Broad Market": ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "AMZN", "GOOGL", "NVDA", "META", "TSLA"],
 }
 
+# Crypto universe by category (Alpaca uses BTC/USD format)
+CRYPTO_UNIVERSE = {
+    "Major":   ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"],
+    "Mid Cap": ["AVAX/USD", "DOGE/USD", "LINK/USD", "DOT/USD", "LTC/USD"],
+    "DeFi":    ["UNI/USD", "AAVE/USD", "CRV/USD", "SUSHI/USD"],
+    "Layer 1": ["ADA/USD"],
+    "Meme":    ["DOGE/USD", "SHIB/USD"],
+}
+CRYPTO_ALL: list[str] = list(dict.fromkeys(s for syms in CRYPTO_UNIVERSE.values() for s in syms))
+
 # Combined ETFs + stocks per sector (for "Sector" watchlist source)
 SECTOR_UNIVERSE: dict[str, list[str]] = {}
 for _sector in set(list(ETF_UNIVERSE.keys()) + list(SECTOR_STOCKS.keys())):
@@ -166,15 +176,25 @@ def sector_list(sectors: list[str] | None = None) -> list[str]:
     return list(dict.fromkeys(syms))
 
 
+def crypto_list(categories: list[str] | None = None) -> list[str]:
+    """Return crypto symbols for selected categories (or all if None)."""
+    selected = categories or list(CRYPTO_UNIVERSE.keys())
+    syms: list[str] = []
+    for cat in selected:
+        syms.extend(CRYPTO_UNIVERSE.get(cat, []))
+    return list(dict.fromkeys(syms))
+
+
 def build_watchlist(
     source: str,
     top_n: int = 10,
     etf_themes: list[str] | None = None,
     sectors: list[str] | None = None,
+    crypto_categories: list[str] | None = None,
 ) -> list[str]:
     """
     Build a dynamic watchlist.
-    source: "static" | "most_active" | "gainers" | "losers" | "etf" | "sector" | "trending"
+    source: "static" | "most_active" | "gainers" | "losers" | "etf" | "sector" | "trending" | "crypto"
     """
     if source == "most_active":
         return _clean(most_active(top_n))
@@ -188,4 +208,6 @@ def build_watchlist(
         return sector_list(sectors)
     if source == "trending":
         return trending(top_n)
+    if source == "crypto":
+        return crypto_list(crypto_categories)
     return config.WATCHLIST  # fallback to static

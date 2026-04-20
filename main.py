@@ -448,9 +448,13 @@ def _place_buy(symbol: str, sig: dict, account: dict, positions: list[dict], wat
         sig["price"], account,
         atr=sig.get("atr"),
         realized_vol=sig.get("regime_realized_vol"),
+        symbol=symbol,
     )
-    # Apply agent-suggested size multiplier
-    qty = max(1.0, round(qty * result["size_multiplier"], 0))
+    # Apply agent-suggested size multiplier; crypto keeps fractional precision
+    if broker.is_crypto(symbol):
+        qty = max(0.000001, round(qty * result["size_multiplier"], 6))
+    else:
+        qty = max(1.0, round(qty * result["size_multiplier"], 0))
 
     # Apply agent-suggested dynamic stop for this position
     if result["suggested_stop_pct"] and config.AGENT_DYNAMIC_STOPS:
@@ -527,8 +531,11 @@ def _place_short(symbol: str, sig: dict, account: dict, positions: list[dict], w
         )
         return False
 
-    qty = risk.compute_qty(sig["price"], account, atr=sig.get("atr"))
-    qty = max(1.0, round(qty * result["size_multiplier"], 0))
+    qty = risk.compute_qty(sig["price"], account, atr=sig.get("atr"), symbol=symbol)
+    if broker.is_crypto(symbol):
+        qty = max(0.000001, round(qty * result["size_multiplier"], 6))
+    else:
+        qty = max(1.0, round(qty * result["size_multiplier"], 0))
     if result["suggested_stop_pct"] and config.AGENT_DYNAMIC_STOPS:
         _position_stops[symbol] = result["suggested_stop_pct"]
         log.info("%s: dynamic stop set to %.1f%%", symbol, result["suggested_stop_pct"] * 100)
