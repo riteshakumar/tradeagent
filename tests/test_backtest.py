@@ -543,20 +543,22 @@ def test_run_portfolio_respects_provided_daily_watchlist(monkeypatch):
         ],
     }
 
-    def _always_buy(
-        _bars: list[dict],
+    def _always_buy_at_index(
+        idx: int,
+        pre: dict,
         market_trend: int = 0,
         earnings_soon: bool = False,
         threshold: int | None = None,
-        timeframe: str | None = None,
+        disabled_components=None,
     ) -> dict:
-        close = float(_bars[-1]["c"])
+        close = pre["close"]
+        price = float(close.iloc[idx]) if idx < len(close) else 100.0
         return {
             "signal": "buy",
             "score": 10,
             "reason": "forced",
             "rsi": 50,
-            "price": close,
+            "price": price,
             "atr": 5,
             "event_score": 0,
             "event_reasons": [],
@@ -565,7 +567,8 @@ def test_run_portfolio_respects_provided_daily_watchlist(monkeypatch):
             "regime_realized_vol": 0.0,
         }
 
-    monkeypatch.setattr(backtest.strategy, "compute_signals", _always_buy)
+    monkeypatch.setattr(backtest.strategy, "signal_at_index", _always_buy_at_index)
+    monkeypatch.setattr(backtest, "_build_event_context", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(backtest, "_build_market_event_context", lambda _df: {})
     monkeypatch.setattr(backtest, "_build_spy_trend", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(backtest, "_spy_benchmark", lambda *_args, **_kwargs: None)
