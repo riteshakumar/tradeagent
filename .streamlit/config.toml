@@ -1,23 +1,27 @@
+# Unified with the dashboard glass theme (dashboard.py CSS vars).
+# Palette: navy glass surfaces, cyan accent, Manrope body / JetBrains Mono data.
+
 [theme]
 base = "dark"
 
-# Colors
-textColor                    = "#e2e8f0"
-primaryColor                 = "#615fff"
-backgroundColor              = "#1d293d"
-secondaryBackgroundColor     = "#0f172b"
+# Colors — mirror dashboard.py :root tokens
+primaryColor             = "#22d3ee"   # --accent
+backgroundColor          = "#0a1428"   # --bg-1
+secondaryBackgroundColor = "#0f1d38"   # --bg-2
+textColor                = "#e8eef9"   # --text-main
+linkColor                = "#38bdf8"   # --accent-2
 
 # Widgets
-showWidgetBorder             = true
-borderColor                  = "#314158"
+showWidgetBorder = true
+borderColor      = "#263a57"           # --border-0
 
 # Dataframes
-dataframeHeaderBackgroundColor = "#1d293d"
+dataframeHeaderBackgroundColor = "#0f1d38"
+dataframeBorderColor           = "#263a57"
 
-# Typography — Space Grotesk (same as demo-stockpeers)
-font            = "'Space Grotesk':https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300..700&display=swap"
-baseFontWeight  = 300
-baseFontSize    = 14
-headingFont     = "Space Grotesk"
-headingFontWeights = [300, 400, 400, 300, 300, 300]
-headingFontSizes   = ["2.5rem", "1.5rem", "1rem"]
+# Typography — Manrope everywhere, JetBrains Mono for code/data
+font     = "'Manrope':https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&display=swap"
+baseFontWeight = 400
+baseFontSize   = 14
+headingFont    = "Manrope"

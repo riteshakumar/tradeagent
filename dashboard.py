@@ -1320,6 +1320,8 @@ textarea:focus-visible,
     [data-testid="stButton"] > button { min-height: 44px; font-size: 0.84rem !important; }
 }
 
+::selection { background: rgba(34, 211, 238, 0.28); color: #f0f9ff; }
+
 @media (prefers-reduced-motion: reduce) {
     .ticker-track,
     .loop-state.running::before,
@@ -1648,7 +1650,7 @@ def event_card(label, score, confidence, reason):
     st.markdown(f"""<div class="event-card {cls}">
         <span style="color:{color};font-weight:700;font-size:0.9rem">{icon} {label}</span>
         &nbsp;<span style="color:#7f95b3;font-size:0.78rem">score <b style="color:{color}">{score:+d}</b> &nbsp;·&nbsp; confidence <b style="color:#7dd3fc">{confidence}</b></span>
-        <div style="color:#cbd5e1;font-size:0.83rem;margin-top:6px;line-height:1.4">{reason}</div>
+        <div style="color:var(--text-soft);font-size:0.83rem;margin-top:6px;line-height:1.4">{reason}</div>
     </div>""", unsafe_allow_html=True)
 
 _P = 'padding:8px 14px;vertical-align:middle'  # shared td padding
@@ -1656,7 +1658,7 @@ _P = 'padding:8px 14px;vertical-align:middle'  # shared td padding
 _SIGNAL_BADGES = {
     "BUY":  f'<td style="{_P};white-space:nowrap"><span style="background:#052e16;color:#34d399;border:1px solid #059669;padding:2px 12px;border-radius:20px;font-size:0.75rem;font-weight:700">▲ BUY</span></td>',
     "SELL": f'<td style="{_P};white-space:nowrap"><span style="background:#431407;color:#fdba74;border:1px solid #ea580c;padding:2px 12px;border-radius:20px;font-size:0.75rem;font-weight:700">▼ SELL</span></td>',
-    "HOLD": f'<td style="{_P};white-space:nowrap"><span style="background:#1e293b;color:#cbd5e1;border:1px solid #334155;padding:2px 12px;border-radius:20px;font-size:0.75rem;font-weight:700">● HOLD</span></td>',
+    "HOLD": f'<td style="{_P};white-space:nowrap"><span style="background:var(--control-bg);color:var(--text-soft);border:1px solid var(--control-border);padding:2px 12px;border-radius:20px;font-size:0.75rem;font-weight:700">● HOLD</span></td>',
 }
 _STATUS_COLORS = {"FILLED":"#7dd3fc","CANCELED":"#fb923c","PENDING_NEW":"#f59e0b","NEW":"#f59e0b","PARTIALLY_FILLED":"#67e8f9","REJECTED":"#fb923c"}
 
@@ -1711,8 +1713,8 @@ _CELL_DISPATCH = {
     "Score":    lambda v,s: _cell_score(v),
     "side":     lambda v,s: f'<td style="{_P}"><span style="color:{"#34d399" if s.upper() in ("BUY","LONG") else "#fdba74"};font-weight:700">{s}</span></td>',
     "status":   lambda v,s: f'<td style="{_P};color:{_STATUS_COLORS.get(s.upper(),"#94a3b8")};font-weight:600;font-size:0.8rem">{s}</td>',
-    "Symbol":   lambda v,s: f'<td style="{_P};color:#a5b4fc;font-weight:700;letter-spacing:0.04em;white-space:nowrap">{s}</td>',
-    "symbol":   lambda v,s: f'<td style="{_P};color:#a5b4fc;font-weight:700;letter-spacing:0.04em;white-space:nowrap">{s}</td>',
+    "Symbol":   lambda v,s: f'<td style="{_P};color:#7dd3fc;font-weight:700;letter-spacing:0.04em;white-space:nowrap">{s}</td>',
+    "symbol":   lambda v,s: f'<td style="{_P};color:#7dd3fc;font-weight:700;letter-spacing:0.04em;white-space:nowrap">{s}</td>',
     "RSI":         lambda v,s: _cell_rsi(v),
     "Reason":      lambda v,s: _cell_text(s, "#94a3b8", "260px"),
     "reason":      lambda v,s: _cell_text(s, "#94a3b8", "260px"),
@@ -1736,7 +1738,7 @@ _CELL_DISPATCH = {
         f'padding:1px 8px;border-radius:20px">'
         f'{"✓ OK" if "approve" in s.lower() else "✗ No"}</span></td>'
         if s not in ("—", "")
-        else f'<td style="{_P};color:#334155;text-align:center;font-size:0.78rem">—</td>'
+        else f'<td style="{_P};color:var(--border-1);text-align:center;font-size:0.78rem">—</td>'
     ),
     **{k: (lambda v,s: f'<td style="{_P};color:#e2e8f0;font-family:monospace;white-space:nowrap">{s}</td>')
        for k in ["Price","price","avg_entry","current_price","filled_avg","value","entry","exit"]},
@@ -2754,13 +2756,13 @@ def render_overview_panel():
 
     st.markdown(
         f"""<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
-        <span style="background:#1e293b;border:1px solid #334155;border-radius:6px;padding:4px 12px;font-size:0.78rem;">
+        <span style="background:var(--control-bg);border:1px solid var(--control-border);border-radius:8px;padding:4px 12px;font-size:0.78rem;">
             SPY trend: <b style="color:{_spy_color}">{_spy_label}</b>
         </span>
-        <span style="background:#1e293b;border:1px solid #334155;border-radius:6px;padding:4px 12px;font-size:0.78rem;">
+        <span style="background:var(--control-bg);border:1px solid var(--control-border);border-radius:8px;padding:4px 12px;font-size:0.78rem;">
             Phase: <b style="color:{_phase_color}">{_phase_label_ov}</b>
         </span>
-        <span style="background:#1e293b;border:1px solid #334155;border-radius:6px;padding:4px 12px;font-size:0.78rem;">
+        <span style="background:var(--control-bg);border:1px solid var(--control-border);border-radius:8px;padding:4px 12px;font-size:0.78rem;">
             Regime switching: <b style="color:{_regime_color}">{_regime_label}</b>
         </span>
         </div>""",
@@ -2842,7 +2844,7 @@ def render_overview_panel():
             _m5.metric("Regime", str(_sig.get("regime", "range")).replace("_", " ").title())
 
             st.markdown(
-                f'<div style="background:#0f172b;border:1px solid #1e293b;border-left:3px solid #38bdf8;'
+                f'<div style="background:var(--glass-pane);border:1px solid var(--glass-border);border-left:3px solid #38bdf8;backdrop-filter:blur(var(--glass-blur));'
                 f'border-radius:8px;padding:10px 16px;color:#94a3b8;font-size:0.85rem;margin:4px 0 12px 0;'
                 f'height:{_overview_reason_height}px;overflow:auto;">'
                 f'{_sig["reason"]}</div>',
@@ -3394,7 +3396,7 @@ def render_journal_panel():
 
         # ── Recent decisions ───────────────────────────────────────────────────
         import json, os
-        _jfile = os.path.join(os.path.dirname(__file__), "trade_journal.json") if False else "trade_journal.json"
+        _jfile = os.path.join(os.path.dirname(__file__), "trade_journal.json")
         try:
             with open(_jfile) as _f:
                 _records = json.load(_f)
@@ -3461,7 +3463,7 @@ def render_log_panel():
         with open("trade.log") as f:
             lines = list(deque(f, maxlen=max(400, log_lines * 8)))
 
-        _level_colors = {"ERROR": "#f87171", "WARNING": "#f59e0b", "INFO": "#94a3b8", "DEBUG": "#64748b"}
+        _level_colors = {"ERROR": "#fb7185", "WARNING": "#f59e0b", "INFO": "#b9c9df", "DEBUG": "#7f95b3"}
         _level_bg = {"ERROR": "#2d0a0a22", "WARNING": "#2d1a0022", "INFO": "", "DEBUG": ""}
         filtered = [l for l in lines if log_filter == "ALL" or f"[{log_filter}]" in l]
         display = filtered[-log_lines:]
@@ -3473,12 +3475,12 @@ def render_log_panel():
                 if f"[{lvl}]" in line:
                     level = lvl
                     break
-            color = _level_colors.get(level, "#cbd5e1")
+            color = _level_colors.get(level, "#b9c9df")
             bg = _level_bg.get(level, "")
             bg_style = f"background:{bg};" if bg else ""
             html_lines.append(f'<div style="{bg_style}padding:2px 8px;font-family:monospace;font-size:0.78rem;color:{color};border-left:2px solid {color}33;margin-bottom:1px">{line}</div>')
 
-        st.markdown('<div style="background:#0a0f1e;border:1px solid #1e293b;border-radius:8px;padding:8px;max-height:520px;overflow-y:auto">' + "".join(html_lines) + "</div>", unsafe_allow_html=True)
+        st.markdown('<div style="background:var(--glass-pane-strong);border:1px solid var(--glass-border);border-radius:var(--radius-sm);padding:8px;max-height:520px;overflow-y:auto;backdrop-filter:blur(var(--glass-blur))">' + "".join(html_lines) + "</div>", unsafe_allow_html=True)
     except FileNotFoundError:
         alert("neutral", "No trade.log yet — run main.py to start logging.")
 

@@ -1,12 +1,21 @@
-"""Plotly chart helpers."""
+"""Plotly chart helpers — themed to match the dashboard glass system."""
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
 
-_BG   = "#0f172b"
-_GRID = "#1e293b"
-_FONT = {"color": "#94a3b8", "family": "Space Grotesk, sans-serif", "size": 11}
+# Palette mirrors dashboard.py :root tokens. Backgrounds are transparent so
+# charts inherit the glass pane behind [data-testid="stPlotlyChart"] instead
+# of rendering as opaque slate rectangles.
+_BG      = "rgba(0,0,0,0)"
+_GRID    = "rgba(129, 161, 202, 0.13)"       # --glass-border, faded
+_TEXT    = "#b9c9df"                          # --text-soft
+_TICK    = "#7f95b3"                          # --text-dim
+_ACCENT  = "#22d3ee"                          # --accent
+_ACCENT2 = "#38bdf8"                          # --accent-2
+_UP      = "#34d399"                          # --success
+_DOWN    = "#fb7185"                          # --danger
+_FONT    = {"color": _TEXT, "family": "Manrope, sans-serif", "size": 11}
 
 
 def _base_layout(**kwargs) -> dict:
@@ -14,15 +23,20 @@ def _base_layout(**kwargs) -> dict:
         "paper_bgcolor": _BG,
         "plot_bgcolor":  _BG,
         "font":          _FONT,
-        "legend":        {"bgcolor": "rgba(0,0,0,0)", "font": {"size": 10}},
+        "legend":        {"bgcolor": "rgba(0,0,0,0)", "font": {"size": 10, "color": _TICK}},
         "margin":        {"l": 0, "r": 0, "t": 30, "b": 0},
+        "hoverlabel": {
+            "bgcolor": "rgba(10, 23, 44, 0.94)",
+            "bordercolor": "rgba(129, 161, 202, 0.35)",
+            "font": {"family": "JetBrains Mono, monospace", "size": 11, "color": "#e8eef9"},
+        },
     }
     base.update(kwargs)
     return base
 
 
 def _axis_style() -> dict:
-    return {"gridcolor": _GRID, "zerolinecolor": _GRID, "tickfont": {"color": "#64748b"}}
+    return {"gridcolor": _GRID, "zerolinecolor": _GRID, "tickfont": {"color": _TICK}}
 
 
 def candlestick(bars: list[dict], symbol: str, signals: dict | None = None) -> go.Figure:
@@ -41,8 +55,8 @@ def candlestick(bars: list[dict], symbol: str, signals: dict | None = None) -> g
     fig.add_trace(go.Candlestick(
         x=df["t"], open=df["o"], high=df["h"], low=df["l"], close=df["c"],
         name=symbol,
-        increasing_line_color="#34d399", decreasing_line_color="#f87171",
-        increasing_fillcolor="#34d399",  decreasing_fillcolor="#f87171",
+        increasing_line_color=_UP, decreasing_line_color=_DOWN,
+        increasing_fillcolor=_UP,  decreasing_fillcolor=_DOWN,
     ), row=1, col=1)
 
     # EMAs
@@ -50,9 +64,9 @@ def candlestick(bars: list[dict], symbol: str, signals: dict | None = None) -> g
     ema20  = close.ewm(span=20,  adjust=False).mean()
     ema50  = close.ewm(span=50,  adjust=False).mean()
     ema200 = close.ewm(span=200, adjust=False).mean()
-    fig.add_trace(go.Scatter(x=df["t"], y=ema20,  name="EMA20",  line={"color": "#a5b4fc", "width": 1.2}, opacity=0.8), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df["t"], y=ema20,  name="EMA20",  line={"color": _ACCENT2, "width": 1.2}, opacity=0.8), row=1, col=1)
     fig.add_trace(go.Scatter(x=df["t"], y=ema50,  name="EMA50",  line={"color": "#f59e0b", "width": 1.2}, opacity=0.8), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df["t"], y=ema200, name="EMA200", line={"color": "#64748b", "width": 1.0, "dash": "dot"}, opacity=0.6), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df["t"], y=ema200, name="EMA200", line={"color": _TICK, "width": 1.0, "dash": "dot"}, opacity=0.6), row=1, col=1)
 
     # Signal markers
     if signals:
@@ -62,17 +76,17 @@ def candlestick(bars: list[dict], symbol: str, signals: dict | None = None) -> g
             fig.add_trace(go.Scatter(
                 x=[last_bar["t"]], y=[float(last_bar["l"]) * 0.998],
                 mode="markers+text", name="BUY",
-                marker={"symbol": "triangle-up", "size": 16, "color": "#34d399"},
+                marker={"symbol": "triangle-up", "size": 16, "color": _UP},
                 text=["BUY"], textposition="bottom center",
-                textfont={"color": "#34d399", "size": 11},
+                textfont={"color": _UP, "size": 11},
             ), row=1, col=1)
         elif sig == "sell":
             fig.add_trace(go.Scatter(
                 x=[last_bar["t"]], y=[float(last_bar["h"]) * 1.002],
                 mode="markers+text", name="SELL",
-                marker={"symbol": "triangle-down", "size": 16, "color": "#f87171"},
+                marker={"symbol": "triangle-down", "size": 16, "color": _DOWN},
                 text=["SELL"], textposition="top center",
-                textfont={"color": "#f87171", "size": 11},
+                textfont={"color": _DOWN, "size": 11},
             ), row=1, col=1)
 
     # RSI
@@ -81,13 +95,13 @@ def candlestick(bars: list[dict], symbol: str, signals: dict | None = None) -> g
     loss  = (-delta.clip(upper=0)).ewm(com=13, min_periods=14).mean()
     rsi   = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
     fig.add_trace(go.Scatter(x=df["t"], y=rsi, name="RSI", line={"color": "#a78bfa", "width": 1.5}), row=2, col=1)
-    fig.add_hline(y=70, line_dash="dot", line_color="#f87171", opacity=0.5, row=2, col=1)
-    fig.add_hline(y=30, line_dash="dot", line_color="#34d399", opacity=0.5, row=2, col=1)
-    fig.add_hrect(y0=70, y1=100, fillcolor="#f87171", opacity=0.05, row=2, col=1)
-    fig.add_hrect(y0=0,  y1=30,  fillcolor="#34d399", opacity=0.05, row=2, col=1)
+    fig.add_hline(y=70, line_dash="dot", line_color=_DOWN, opacity=0.5, row=2, col=1)
+    fig.add_hline(y=30, line_dash="dot", line_color=_UP, opacity=0.5, row=2, col=1)
+    fig.add_hrect(y0=70, y1=100, fillcolor=_DOWN, opacity=0.05, row=2, col=1)
+    fig.add_hrect(y0=0,  y1=30,  fillcolor=_UP, opacity=0.05, row=2, col=1)
 
     # Volume
-    colors = ["#34d399" if c >= o else "#f87171"
+    colors = [_UP if c >= o else _DOWN
               for c, o in zip(df["c"].astype(float), df["o"].astype(float))]
     fig.add_trace(go.Bar(x=df["t"], y=df["v"].astype(float),
         name="Volume", marker_color=colors, opacity=0.7), row=3, col=1)
@@ -95,7 +109,7 @@ def candlestick(bars: list[dict], symbol: str, signals: dict | None = None) -> g
     ax = _axis_style()
     fig.update_layout(
         height=580, xaxis_rangeslider_visible=False,
-        title={"text": symbol, "font": {"color": "#e2e8f0", "size": 14}, "x": 0.01},
+        title={"text": symbol, "font": {"color": "#e8eef9", "size": 14, "family": "Manrope, sans-serif"}, "x": 0.01},
         **_base_layout(),
     )
     for axis in ["xaxis", "xaxis2", "xaxis3", "yaxis", "yaxis2", "yaxis3"]:
@@ -109,12 +123,12 @@ def _add_trade_markers(fig: go.Figure, trades: list[dict], eq_lookup: dict, date
     for t in trades:
         entry_date = _nearest_date(dates, t.get("entry_date", ""))
         exit_date  = _nearest_date(dates, t.get("exit_date", ""))
-        color = "#34d399" if t["pnl"] >= 0 else "#f87171"
+        color = _UP if t["pnl"] >= 0 else _DOWN
         if entry_date and entry_date in eq_lookup:
             fig.add_trace(go.Scatter(
                 x=[entry_date], y=[eq_lookup[entry_date]],
                 mode="markers", showlegend=False,
-                marker={"symbol": "triangle-up", "size": 10, "color": "#34d399"},
+                marker={"symbol": "triangle-up", "size": 10, "color": _UP},
                 hovertemplate=f"Entry ${t['entry']}<br>",
             ))
         if exit_date and exit_date in eq_lookup:
@@ -140,8 +154,8 @@ def equity_curve(
 
     fig.add_trace(go.Scatter(
         x=df["date"], y=df["equity"],
-        fill="tozeroy", fillcolor="rgba(97,95,255,0.08)",
-        line={"color": "#615fff", "width": 2},
+        fill="tozeroy", fillcolor="rgba(34, 211, 238, 0.10)",
+        line={"color": _ACCENT, "width": 2},
         name="Strategy",
     ))
 
@@ -149,7 +163,7 @@ def equity_curve(
         bdf = pd.DataFrame(benchmark_records)
         fig.add_trace(go.Scatter(
             x=bdf["date"], y=bdf["equity"],
-            line={"color": "#64748b", "width": 1.5, "dash": "dot"},
+            line={"color": _TICK, "width": 1.5, "dash": "dot"},
             name="SPY (buy & hold)", opacity=0.7,
         ))
 
@@ -196,9 +210,9 @@ def live_equity_curve(orders: list[dict], initial_cash: float = 100_000) -> go.F
     fig.add_trace(go.Scatter(
         x=df["time"], y=df["equity"],
         mode="lines+markers",
-        fill="tozeroy", fillcolor="rgba(52,211,153,0.08)",
-        line={"color": "#34d399", "width": 2},
-        marker={"size": 6, "color": ["#34d399" if p >= 0 else "#f87171" for p in df["pnl"]]},
+        fill="tozeroy", fillcolor="rgba(52, 211, 153, 0.10)",
+        line={"color": _UP, "width": 2},
+        marker={"size": 6, "color": [_UP if p >= 0 else _DOWN for p in df["pnl"]]},
         name="Live Equity",
         hovertemplate="<b>%{x}</b><br>Equity: $%{y:,.2f}<extra></extra>",
     ))
