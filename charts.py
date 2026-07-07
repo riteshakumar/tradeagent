@@ -152,6 +152,12 @@ def equity_curve(
     df  = pd.DataFrame(pnl_records)
     fig = go.Figure()
 
+    # Glow underlay: wide translucent stroke beneath the line
+    fig.add_trace(go.Scatter(
+        x=df["date"], y=df["equity"],
+        line={"color": "rgba(34, 211, 238, 0.16)", "width": 9},
+        hoverinfo="skip", showlegend=False, mode="lines",
+    ))
     fig.add_trace(go.Scatter(
         x=df["date"], y=df["equity"],
         fill="tozeroy", fillcolor="rgba(34, 211, 238, 0.10)",
@@ -207,6 +213,11 @@ def live_equity_curve(orders: list[dict], initial_cash: float = 100_000) -> go.F
 
     df = pd.DataFrame(points)
     fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["time"], y=df["equity"],
+        line={"color": "rgba(52, 211, 153, 0.16)", "width": 9},
+        hoverinfo="skip", showlegend=False, mode="lines",
+    ))
     fig.add_trace(go.Scatter(
         x=df["time"], y=df["equity"],
         mode="lines+markers",

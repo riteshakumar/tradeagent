@@ -1333,6 +1333,148 @@ textarea:focus-visible,
         transform: none !important;
     }
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   V2 POLISH LAYER — depth, glow, and display typography.
+   Appended last so it wins specificity ties with the base theme.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Deeper aurora backdrop + faint dot-grid texture */
+html, body, .stApp {
+    background:
+        radial-gradient(1100px 540px at 10% -10%, rgba(34, 211, 238, 0.20), transparent 55%),
+        radial-gradient(940px 500px at 102% 2%, rgba(56, 189, 248, 0.17), transparent 52%),
+        radial-gradient(1250px 720px at 50% 118%, rgba(20, 184, 166, 0.14), transparent 58%),
+        linear-gradient(168deg, #040812 0%, #071124 46%, #050b18 100%);
+    background-attachment: fixed;
+}
+.stApp::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background-image: radial-gradient(rgba(148, 199, 255, 0.055) 1px, transparent 1px);
+    background-size: 26px 26px;
+    -webkit-mask-image: radial-gradient(ellipse at 50% 0%, black 28%, transparent 76%);
+    mask-image: radial-gradient(ellipse at 50% 0%, black 28%, transparent 76%);
+}
+
+/* Metrics: mono tabular numerals with an ice→sky gradient */
+[data-testid="stMetric"] {
+    padding: 16px 18px 14px 18px;
+    border-radius: var(--radius-lg);
+}
+[data-testid="stMetricValue"] {
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 1.68rem !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.015em;
+    font-variant-numeric: tabular-nums;
+    background: linear-gradient(120deg, #f0f9ff 18%, #7dd3fc 88%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent !important;
+}
+[data-testid="stMetric"]:hover {
+    border-color: rgba(125, 211, 252, 0.55);
+    transform: translateY(-2px);
+    box-shadow:
+        0 18px 44px rgba(2, 8, 20, 0.5),
+        0 0 26px rgba(34, 211, 238, 0.15),
+        inset 0 1px 0 rgba(186, 230, 253, 0.18);
+}
+
+/* Custom stat cards pick up the same numeral treatment */
+.stat-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+}
+
+/* Hero: slow light sweep along the border */
+.hero-shell::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    padding: 1px;
+    pointer-events: none;
+    background: linear-gradient(115deg,
+        rgba(34, 211, 238, 0) 30%,
+        rgba(34, 211, 238, 0.75) 50%,
+        rgba(56, 189, 248, 0) 70%);
+    background-size: 260% 100%;
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    animation: heroSweep 7s linear infinite;
+}
+@keyframes heroSweep {
+    from { background-position: 260% 0; }
+    to   { background-position: -160% 0; }
+}
+
+/* Primary actions: cyan→teal gradient, dark ink, soft glow */
+[data-testid="stButton"] > button[kind="primary"] {
+    background: linear-gradient(135deg, #0e7490 0%, #06b6d4 48%, #14b8a6 100%) !important;
+    border: 1px solid rgba(165, 243, 252, 0.55) !important;
+    color: #04222b !important;
+    font-weight: 800 !important;
+    letter-spacing: 0.02em;
+    text-shadow: none !important;
+    box-shadow: 0 10px 26px rgba(6, 182, 212, 0.32), inset 0 1px 0 rgba(240, 253, 255, 0.35) !important;
+}
+[data-testid="stButton"] > button[kind="primary"]:hover {
+    transform: translateY(-1px);
+    border-color: #a5f3fc !important;
+    box-shadow: 0 16px 34px rgba(6, 182, 212, 0.44), inset 0 1px 0 rgba(240, 253, 255, 0.45) !important;
+}
+
+/* Active tab: glowing underline */
+[data-testid="stTab"] { position: relative; }
+[data-testid="stTab"][aria-selected="true"]::after {
+    content: "";
+    position: absolute;
+    left: 16%;
+    right: 16%;
+    bottom: -1px;
+    height: 2px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, transparent, #22d3ee, transparent);
+    box-shadow: 0 0 14px rgba(34, 211, 238, 0.75);
+}
+
+/* Section headers: display face + glowing marker */
+.section-header {
+    font-family: 'Sora', sans-serif;
+    font-size: 0.96rem;
+    letter-spacing: 0.015em;
+}
+.section-dot { box-shadow: 0 0 10px 1px rgba(34, 211, 238, 0.35); }
+
+/* Live loop state: breathing glow ring */
+.loop-state.running {
+    box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.35), 0 0 20px rgba(52, 211, 153, 0.22);
+}
+
+/* Dataframes sit in glass frames like the charts */
+[data-testid="stDataFrame"] {
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    box-shadow: var(--glass-shadow);
+}
+
+/* Cyan-tinted scrollbar */
+::-webkit-scrollbar-thumb { background: linear-gradient(180deg, #2c4566, #1f6f8a); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: #2b8aa8; }
+
+@media (prefers-reduced-motion: reduce) {
+    .hero-shell::before { animation: none !important; background: none !important; }
+    [data-testid="stMetric"]:hover,
+    [data-testid="stButton"] > button[kind="primary"]:hover { transform: none !important; }
+}
 </style>
 """, unsafe_allow_html=True)
 
