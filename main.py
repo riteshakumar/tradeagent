@@ -28,33 +28,55 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# In-memory trailing stop state: symbol → highest price seen since entry
-_peak_prices: dict[str, float] = {}
+# Per-position state — persisted to position_state.json so restarts don't
+# reset trailing peaks, repeat partial scale-outs, or drop dynamic stops.
+# These are aliases to shared dicts: mutate in place, call position_state.save()
+# after mutations (or position_state.clear_symbol() on close).
+import position_state
 
-# In-memory partial scale-out tracking: symbol → True once 50% already sold
-_partial_done: dict[str, bool] = {}
+_peak_prices   = position_state.peak_prices    # symbol → highest price since entry
+_partial_done  = position_state.partial_done   # symbol → True once 50% already sold
+_position_stops = position_state.position_stops  # symbol → per-position stop pct override
+_exit_holds    = position_state.exit_holds     # symbol → consecutive exit-review holds
 
 _curated_blacklist: set[str] = set()   # tickers with bad news today
 _curate_date: date | None = None       # date curation last ran
-_position_stops: dict[str, float] = {} # symbol → per-position stop pct override
-_exit_holds: dict[str, int] = {}       # symbol → consecutive exit-review holds
 _last_rebalance_date: date | None = None
 
 
 def _get_clock():
-    from alpaca.trading.client import TradingClient
+    return broker.get_clock()
 
-    client = TradingClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY, paper=config.PAPER_TRADING)
-    return client.get_clock()
+
+# Last successfully computed trend — reused if the data feed is briefly down
+# so a transient outage doesn't silently disable the counter-trend filters.
+_last_known_trend: int | None = None
+
+
+def _trend_fail_fallback() -> int:
+    """
+    Resolve the trend when SPY data is unavailable and no prior value exists.
+    MARKET_TREND_FAIL_MODE:
+      "bear"    (default) — fail-safe: treat as bear, blocking counter-trend longs
+      "neutral"           — legacy fail-open behavior (filters effectively off)
+    """
+    if config.MARKET_TREND_FAIL_MODE == "neutral":
+        return 0
+    return -1
 
 
 def _get_market_trend() -> int:
     """
     Return +1 if SPY is above its 200-day EMA (bull market), -1 if below.
     Always uses daily bars regardless of strategy timeframe so EMA200 is meaningful.
-    Returns 0 (neutral) on any error so trading is never inadvertently blocked.
+
+    Failure behavior (fail-safe, not fail-open):
+      1. Reuse the last successfully computed trend from this session, else
+      2. Fall back per MARKET_TREND_FAIL_MODE (default "bear" = conservative),
+    and fire an alert so the outage is never silent.
     Respects 'market_trend_override' from settings_store: 1=bull, -1=bear, 0=auto.
     """
+    global _last_known_trend
     override = settings_store.get("market_trend_override", 0)
     if override in (1, -1):
         log.info("Market trend OVERRIDDEN via settings: %s", "BULL" if override == 1 else "BEAR")
@@ -62,14 +84,35 @@ def _get_market_trend() -> int:
     try:
         spy_bars = broker.get_bars("SPY", timeframe="1Day", lookback_days=250)
         if not spy_bars or len(spy_bars) < 30:
-            return 0
+            raise RuntimeError(f"insufficient SPY bars ({len(spy_bars) if spy_bars else 0})")
         import pandas as _pd
         closes = _pd.Series([float(b["c"]) for b in spy_bars])
         ema200 = closes.ewm(span=200, adjust=False).mean()
-        return 1 if float(closes.iloc[-1]) >= float(ema200.iloc[-1]) else -1
+        trend = 1 if float(closes.iloc[-1]) >= float(ema200.iloc[-1]) else -1
+        _last_known_trend = trend
+        return trend
     except Exception as exc:
-        log.warning("SPY market trend check failed: %s", exc)
-        return 0
+        if _last_known_trend is not None:
+            log.warning(
+                "SPY market trend check failed (%s) — reusing last known trend: %s",
+                exc, "BULL" if _last_known_trend == 1 else "BEAR",
+            )
+            return _last_known_trend
+        fallback = _trend_fail_fallback()
+        log.error(
+            "SPY market trend check failed (%s) with no prior value — "
+            "fail mode '%s' → treating trend as %s",
+            exc, config.MARKET_TREND_FAIL_MODE,
+            {1: "BULL", -1: "BEAR", 0: "NEUTRAL"}[fallback],
+        )
+        alerts.send(
+            "Market trend check failed",
+            f"SPY trend data unavailable: {exc}\n"
+            f"No prior trend this session — using fail mode "
+            f"'{config.MARKET_TREND_FAIL_MODE}' ({fallback:+d}). "
+            f"Counter-trend filters may be degraded.",
+        )
+        return fallback
 
 
 def is_market_open() -> bool:
@@ -306,12 +349,15 @@ def _check_sl_tp(position: dict) -> bool:
     avg_entry = float(position.get("avg_entry", current_price))
     side = position.get("side", "long")
 
-    # Update trailing peak for this position
+    # Update trailing peak for this position (persisted so restarts keep the high-water mark)
+    prev_peak = _peak_prices.get(symbol)
     if symbol not in _peak_prices:
         _peak_prices[symbol] = avg_entry
     if current_price > _peak_prices[symbol]:
         _peak_prices[symbol] = current_price
     peak = _peak_prices[symbol]
+    if peak != prev_peak:
+        position_state.save()
 
     # Trailing stop: trail from peak, not entry
     stop_pct = _position_stops.get(symbol, config.STOP_LOSS_PCT)
@@ -332,6 +378,7 @@ def _check_sl_tp(position: dict) -> bool:
                 if result["approved"]:
                     # Agent says hold the position a bit longer
                     _exit_holds[symbol] = holds + 1
+                    position_state.save()
                     log.info(
                         "%s: exit-review HOLD (%d/%d) — %s",
                         symbol, holds + 1, config.MAX_EXIT_HOLDS, result["reason"],
@@ -339,10 +386,12 @@ def _check_sl_tp(position: dict) -> bool:
                     return False   # skip stop this tick
                 else:
                     _exit_holds[symbol] = 0
+                    position_state.save()
             except Exception as exc:
                 log.warning("%s: exit review error — %s", symbol, exc)
         else:
             _exit_holds[symbol] = 0   # max holds exhausted, proceed with stop
+            position_state.save()
 
     # Partial scale-out: sell half at EXIT_REVIEW_TRIGGER_PCT × TP target
     # e.g. TP=15%, trigger=0.5 → sell 50% at +7.5%, let rest run to full TP
@@ -366,6 +415,7 @@ def _check_sl_tp(position: dict) -> bool:
             try:
                 broker.place_market_order(symbol, partial_qty, "sell")
                 _partial_done[symbol] = True
+                position_state.save()
                 pnl_dollars = (current_price - avg_entry) * partial_qty
                 trade_journal.log_outcome(symbol, avg_entry, current_price, pnl_dollars, "partial_scale_out")
                 alerts.order_alert(symbol, "partial_sell", partial_qty, current_price, "")
@@ -377,9 +427,7 @@ def _check_sl_tp(position: dict) -> bool:
             "%s: TRAILING STOP hit (price=%.2f peak=%.2f trail=%.2f%%) - closing %s",
             symbol, current_price, peak, stop_pct * 100, side,
         )
-        _peak_prices.pop(symbol, None)
-        _partial_done.pop(symbol, None)
-        _position_stops.pop(symbol, None)
+        position_state.clear_symbol(symbol)
         if config.SHADOW_MODE:
             trade = shadow_book.close_position(symbol, float(position["current_price"]), reason="stop_loss")
             if trade:
@@ -397,9 +445,7 @@ def _check_sl_tp(position: dict) -> bool:
 
     if config.TAKE_PROFIT_PCT > 0 and pnl_pct >= config.TAKE_PROFIT_PCT:
         log.info("%s: TAKE PROFIT hit (%.2f%%) - closing %s", symbol, pnl_pct * 100, side)
-        _peak_prices.pop(symbol, None)
-        _partial_done.pop(symbol, None)
-        _position_stops.pop(symbol, None)
+        position_state.clear_symbol(symbol)
         if config.SHADOW_MODE:
             trade = shadow_book.close_position(symbol, float(position["current_price"]), reason="take_profit")
             if trade:
@@ -459,6 +505,7 @@ def _place_buy(symbol: str, sig: dict, account: dict, positions: list[dict], wat
     # Apply agent-suggested dynamic stop for this position
     if result["suggested_stop_pct"] and config.AGENT_DYNAMIC_STOPS:
         _position_stops[symbol] = result["suggested_stop_pct"]
+        position_state.save()
         log.info("%s: dynamic stop set to %.1f%%", symbol, result["suggested_stop_pct"] * 100)
 
     if config.SHADOW_MODE:
@@ -538,6 +585,7 @@ def _place_short(symbol: str, sig: dict, account: dict, positions: list[dict], w
         qty = max(1.0, round(qty * result["size_multiplier"], 0))
     if result["suggested_stop_pct"] and config.AGENT_DYNAMIC_STOPS:
         _position_stops[symbol] = result["suggested_stop_pct"]
+        position_state.save()
         log.info("%s: dynamic stop set to %.1f%%", symbol, result["suggested_stop_pct"] * 100)
 
     if config.SHADOW_MODE:
@@ -606,9 +654,7 @@ def _close_long(symbol: str, sig: dict, positions: list[dict], watchlist: list[s
         log.info("[DRY RUN] Would CLOSE LONG %s", symbol)
         return True
 
-    _peak_prices.pop(symbol, None)
-    _partial_done.pop(symbol, None)
-    _position_stops.pop(symbol, None)
+    position_state.clear_symbol(symbol)
     result = broker.close_position(symbol)
     pnl_dollars = (sig["price"] - float(pos["avg_entry"])) * float(pos["qty"])
     trade_journal.log_outcome(symbol, float(pos["avg_entry"]), sig["price"], pnl_dollars, "sell_signal")
@@ -644,7 +690,7 @@ def _close_short(symbol: str, sig: dict, positions: list[dict]) -> bool:
         log.info("[DRY RUN] Would COVER SHORT %s", symbol)
         return True
 
-    _position_stops.pop(symbol, None)
+    position_state.clear_symbol(symbol)
     result = broker.close_position(symbol)
     pnl_dollars = (float(pos["avg_entry"]) - sig["price"]) * float(pos["qty"])
     trade_journal.log_outcome(symbol, float(pos["avg_entry"]), sig["price"], pnl_dollars, "cover_signal")
@@ -990,6 +1036,17 @@ def run_once() -> None:
 def main() -> None:
     config.validate_runtime()
     log.info("TradeAgent starting up.")
+
+    # Reconcile persisted per-position state with what the broker actually holds:
+    # prunes stale entries (manual closes, crashed sessions) and logs what carried over.
+    try:
+        held = {p["symbol"] for p in broker.get_positions()}
+        position_state.sync(held)
+        carried = sorted(set(_peak_prices) | set(_partial_done) | set(_position_stops) | set(_exit_holds))
+        if carried:
+            log.info("Restored per-position state for: %s", carried)
+    except Exception as exc:
+        log.warning("Could not reconcile position state with broker at startup: %s", exc)
     log.info("Watchlist: %s", get_active_watchlist())
     log.info("Timeframe: %s | Loop: %ss", config.BAR_TIMEFRAME, config.LOOP_INTERVAL_SEC)
     log.info("SL: %.0f%% TP: %.0f%%", config.STOP_LOSS_PCT * 100, config.TAKE_PROFIT_PCT * 100)

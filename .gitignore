@@ -8,3 +8,8 @@ watchlist.json
 settings.json
 shadow_book.json
 .pytest_cache/
+.coverage
+coverage.xml
+trade_journal.json
+position_state.json
+trade.log

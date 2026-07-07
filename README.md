@@ -51,6 +51,11 @@ Enabled by default:
 - `MAX_SECTOR_EXPOSURE_PCT`: sector concentration cap
 - `ENABLE_CORRELATION_CAP`: correlation cap across holdings
 
+Additional resilience behavior:
+- `MARKET_TREND_FAIL_MODE` (`bear` default | `neutral`): if the SPY trend check fails, the last known trend from the session is reused; with no prior value, `bear` conservatively blocks counter-trend longs (and an alert fires). `neutral` restores the old fail-open behavior.
+- Per-position state (trailing-stop peaks, partial scale-out flags, dynamic stops, exit-review holds) is persisted to `position_state.json` and reconciled with the broker at startup, so restarts don't reset trailing stops or repeat scale-outs.
+- Broker read retries only fire on transient errors (network, timeout, 429, 5xx) — auth and other 4xx errors fail fast.
+
 Optional sector mapping override:
 
 ```bash

@@ -8,15 +8,40 @@ from datetime import datetime, timedelta
 import logging
 import time
 
-from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception
 
 import config
 
 log = logging.getLogger(__name__)
 
-_trading = TradingClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY, paper=config.PAPER_TRADING)
-_data = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
-_crypto_data = CryptoHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
+# Clients are constructed lazily so importing this module has no side effects
+# (no credentials needed at import time — simplifies tests and CI).
+_trading_client: TradingClient | None = None
+_data_client: StockHistoricalDataClient | None = None
+_crypto_data_client: CryptoHistoricalDataClient | None = None
+
+
+def _trading_c() -> TradingClient:
+    global _trading_client
+    if _trading_client is None:
+        _trading_client = TradingClient(
+            config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY, paper=config.PAPER_TRADING
+        )
+    return _trading_client
+
+
+def _data_c() -> StockHistoricalDataClient:
+    global _data_client
+    if _data_client is None:
+        _data_client = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
+    return _data_client
+
+
+def _crypto_data_c() -> CryptoHistoricalDataClient:
+    global _crypto_data_client
+    if _crypto_data_client is None:
+        _crypto_data_client = CryptoHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
+    return _crypto_data_client
 
 
 def is_crypto(symbol: str) -> bool:
@@ -31,19 +56,52 @@ _TIMEFRAME_MAP = {
     "1Day":  (TimeFrame.Day,                        timedelta(days=60)),
 }
 
-# Retry config for read-only API calls: 3 attempts, 2–30s exponential backoff.
+def _is_transient(exc: BaseException) -> bool:
+    """
+    Retry only transient failures: network errors, timeouts, rate limits (429),
+    and server errors (5xx). Auth failures, bad requests, and other 4xx fail
+    fast — retrying misconfiguration just adds 30s of backoff before the same error.
+    """
+    import requests as _requests
+
+    if isinstance(exc, (_requests.exceptions.ConnectionError, _requests.exceptions.Timeout)):
+        return True
+    try:
+        from alpaca.common.exceptions import APIError as _APIError
+    except ImportError:
+        return False
+    if isinstance(exc, _APIError):
+        code = getattr(exc, "status_code", None)
+        if code is None:
+            return True  # can't classify — assume transient
+        try:
+            code = int(code)
+        except (TypeError, ValueError):
+            return True
+        return code == 429 or code >= 500
+    return False
+
+
+# Retry config for read-only API calls: 3 attempts, 2–30s exponential backoff,
+# transient errors only (see _is_transient).
 # NOT applied to place_market_order / close_position (would risk double-fills).
 _READ_RETRY = dict(
     wait=wait_exponential(multiplier=1, min=2, max=30),
     stop=stop_after_attempt(3),
-    retry=retry_if_exception_type(Exception),
+    retry=retry_if_exception(_is_transient),
     reraise=True,
 )
 
 
 @retry(**_READ_RETRY)
+def get_clock():
+    """Return the Alpaca market clock (reuses the shared lazy trading client)."""
+    return _trading_c().get_clock()
+
+
+@retry(**_READ_RETRY)
 def get_account() -> dict:
-    acc = _trading.get_account()
+    acc = _trading_c().get_account()
     return {
         "equity": float(acc.equity),
         "cash": float(acc.cash),
@@ -54,7 +112,7 @@ def get_account() -> dict:
 
 @retry(**_READ_RETRY)
 def get_positions() -> list[dict]:
-    positions = _trading.get_all_positions()
+    positions = _trading_c().get_all_positions()
     rows: list[dict] = []
     for p in positions:
         qty = float(p.qty)
@@ -75,7 +133,6 @@ def get_positions() -> list[dict]:
 
 
 @retry(**_READ_RETRY)
-@retry(**_READ_RETRY)
 def get_bars(symbol: str, timeframe: str | None = None, lookback_days: int | None = None) -> list[dict]:
     tf_key = timeframe or config.BAR_TIMEFRAME
     tf, default_lookback = _TIMEFRAME_MAP.get(tf_key, _TIMEFRAME_MAP["5Min"])
@@ -83,10 +140,10 @@ def get_bars(symbol: str, timeframe: str | None = None, lookback_days: int | Non
     start = datetime.now() - lookback
     if is_crypto(symbol):
         req = CryptoBarsRequest(symbol_or_symbols=symbol, timeframe=tf, start=start)
-        bars = _crypto_data.get_crypto_bars(req)[symbol]
+        bars = _crypto_data_c().get_crypto_bars(req)[symbol]
     else:
         req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=tf, start=start)
-        bars = _data.get_stock_bars(req)[symbol]
+        bars = _data_c().get_stock_bars(req)[symbol]
     return [
         {"t": b.timestamp.isoformat(), "o": b.open, "h": b.high, "l": b.low, "c": b.close, "v": b.volume}
         for b in bars
@@ -103,7 +160,7 @@ def place_market_order(symbol: str, qty: float, side: str) -> dict:
         side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
         time_in_force=tif,
     )
-    order = _trading.submit_order(req)
+    order = _trading_c().submit_order(req)
     return {"id": str(order.id), "symbol": symbol, "qty": qty, "side": side, "status": str(order.status)}
 
 
@@ -112,7 +169,7 @@ def get_orders(limit: int = 20) -> list[dict]:
     from alpaca.trading.requests import GetOrdersRequest
     from alpaca.trading.enums import QueryOrderStatus
     req = GetOrdersRequest(status=QueryOrderStatus.ALL, limit=limit)
-    orders = _trading.get_orders(req)
+    orders = _trading_c().get_orders(req)
     return [
         {
             "time":       o.created_at.strftime("%Y-%m-%d %H:%M"),
@@ -163,7 +220,7 @@ def place_sliced_order(
 
 def close_position(symbol: str) -> dict:
     # No retry — closing the same position twice would flip the side.
-    resp = _trading.close_position(symbol)
+    resp = _trading_c().close_position(symbol)
     return {"symbol": symbol, "status": "closed", "order_id": str(resp.id)}
 
 
@@ -171,7 +228,7 @@ def close_position(symbol: str) -> dict:
 def get_position(symbol: str) -> dict | None:
     """Return single position dict or None if not held."""
     try:
-        p = _trading.get_open_position(symbol)
+        p = _trading_c().get_open_position(symbol)
         return {
             "symbol": p.symbol,
             "qty": float(p.qty),

@@ -157,6 +157,13 @@ MIN_HOLD_BARS      = _env_int("MIN_HOLD_BARS", 3, minimum=0, maximum=20)
 # ── Hybrid intelligence controls ───────────────────────────────────────────────
 MULTI_TIMEFRAME_ENABLED    = _env_bool("MULTI_TIMEFRAME_ENABLED", True)
 GAP_FILTER_PCT             = _env_float("GAP_FILTER_PCT", 0.03, minimum=0.0, maximum=0.5)
+# Behavior when the SPY trend check fails with no prior value this session:
+#   "bear"    (default) — fail-safe: block counter-trend longs until data returns
+#   "neutral"           — legacy fail-open: counter-trend filters effectively off
+MARKET_TREND_FAIL_MODE = (os.getenv("MARKET_TREND_FAIL_MODE", "bear").strip().lower()
+                          if os.getenv("MARKET_TREND_FAIL_MODE", "bear").strip().lower() in {"bear", "neutral"}
+                          else "bear")
+
 MARKET_OPEN_BUFFER_MIN     = _env_int("MARKET_OPEN_BUFFER_MIN", 30, minimum=0)
 MARKET_CLOSE_BUFFER_MIN    = _env_int("MARKET_CLOSE_BUFFER_MIN", 30, minimum=0)
 PEER_CHECK_ENABLED         = _env_bool("PEER_CHECK_ENABLED", True)
