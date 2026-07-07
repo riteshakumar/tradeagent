@@ -149,7 +149,10 @@ TREND_STRENGTH_THRESHOLD = _env_float("TREND_STRENGTH_THRESHOLD", 0.012, minimum
 
 # Backtest realism knobs
 BACKTEST_SLIPPAGE_BPS = _env_float("BACKTEST_SLIPPAGE_BPS", 2.0, minimum=0.0, maximum=500.0)
-BACKTEST_FEE_PER_TRADE = _env_float("BACKTEST_FEE_PER_TRADE", 0.0, minimum=0.0, maximum=10_000.0)
+BACKTEST_FEE_PER_TRADE = _env_float("BACKTEST_FEE_PER_TRADE", 1.0, minimum=0.0, maximum=10_000.0)
+# Trade pacing — bars to suppress entries after a stop-out, and minimum hold before stop fires
+STOP_COOLDOWN_BARS = _env_int("STOP_COOLDOWN_BARS", 3, minimum=0, maximum=20)
+MIN_HOLD_BARS      = _env_int("MIN_HOLD_BARS", 3, minimum=0, maximum=20)
 
 # ── Hybrid intelligence controls ───────────────────────────────────────────────
 MULTI_TIMEFRAME_ENABLED    = _env_bool("MULTI_TIMEFRAME_ENABLED", True)

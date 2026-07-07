@@ -929,10 +929,10 @@ def _simulate(
     trail_stop_pct = 0.0    # wider trailing stop (3-6× initial) applied after partial profit fires
     breakeven_locked = False  # True once price moves +1×SL in favour; floors stop at entry
     bars_held = 0            # bars since entry; SL suppressed for MIN_HOLD_BARS to avoid noise-stops
-    _MIN_HOLD_BARS = 3       # don't stop-out until held at least 3 bars (avoids instant whipsaw)
+    _MIN_HOLD_BARS = config.MIN_HOLD_BARS      # don't stop-out until held at least N bars
     stop_cooldown = 0
     exit_hold_count = 0
-    _STOP_COOLDOWN_BARS = 3
+    _STOP_COOLDOWN_BARS = config.STOP_COOLDOWN_BARS
     last_order_at: dict[str, pd.Timestamp] = {}
     risk_manager = risk.RiskManager()
     close_history: dict[str, list[float]] = {symbol.upper(): []}
@@ -1564,6 +1564,11 @@ def _evaluate_parameters(
     warmup_override: int | None = None,
     signal_cache: list[dict | None] | None = None,
 ) -> dict:
+    # Crypto 1Day: signal scores rarely reach 4 (no earnings, no sector rotation).
+    # Lower threshold by 2 (floor 2) so the optimizer/simulator sees real signals.
+    # Applies to all callers: run(), optimize(), walk_forward(), _select_training_parameters().
+    if broker.is_crypto(symbol) and timeframe == "1Day":
+        threshold = max(2, threshold - 2)
     market_event_context = None
     disabled_components = None
     if filter_context:
@@ -1692,17 +1697,12 @@ def run(
         disabled_components=filter_context.get("disabled_components"),
     )
 
-    _base_threshold = strategy._resolve_signal_threshold(timeframe, None)
-    # Crypto needs a lower bar: 24/7 market + fewer correlated signals means
-    # scores rarely reach 4. Drop to 2 for daily crypto to capture real trends.
-    if broker.is_crypto(symbol) and timeframe == "1Day":
-        _base_threshold = max(2, _base_threshold - 2)
     result = _evaluate_parameters(
         df=df,
         symbol=symbol,
         timeframe=timeframe,
         initial_cash=initial_cash,
-        threshold=_base_threshold,
+        threshold=strategy._resolve_signal_threshold(timeframe, None),
         sl_atr_mult=config.SL_ATR_MULT,
         tp_atr_mult=config.TP_ATR_MULT,
         market_trend_by_date=spy_trend,
@@ -1747,7 +1747,7 @@ def walk_forward(
 
     df = _prepare_df(bars)
 
-    spy_trend = _build_spy_trend(timeframe, lookback_days) if symbol != "SPY" else {}
+    spy_trend = {} if (symbol == "SPY" or broker.is_crypto(symbol)) else _build_spy_trend(timeframe, lookback_days)
     filter_context = _build_filter_context(symbol, timeframe, lookback_days, df, market_trend_by_date=spy_trend)
     event_context = _build_event_context(symbol, df)
     filter_context["market_event_context"] = _build_market_event_context(df)
@@ -1961,7 +1961,7 @@ def optimize(
 
     df = _prepare_df(bars)
 
-    spy_trend = _build_spy_trend(timeframe, lookback_days) if symbol != "SPY" else {}
+    spy_trend = {} if (symbol == "SPY" or broker.is_crypto(symbol)) else _build_spy_trend(timeframe, lookback_days)
     filter_context = _build_filter_context(symbol, timeframe, lookback_days, df, market_trend_by_date=spy_trend)
     event_context = _build_event_context(symbol, df)
     filter_context["market_event_context"] = _build_market_event_context(df)
@@ -2157,6 +2157,7 @@ def run_portfolio(
     }
     event_queue: list[tuple[pd.Timestamp, str, int]] = []
 
+    symbol_pres: dict[str, dict] = {}   # precomputed indicator series per symbol (O(n) vs O(n²))
     for symbol, df in symbol_dfs.items():
         warmup = min(20, len(df) // 4)
         for idx in range(warmup, len(df)):
@@ -2169,6 +2170,7 @@ def run_portfolio(
         filter_context["market_event_context"] = market_event_context
         filter_contexts[symbol] = filter_context
         event_contexts[symbol] = event_context
+        symbol_pres[symbol] = strategy.precompute_series(df, timeframe=timeframe)
         states[symbol] = {
             "qty": 0.0,
             "side": None,
@@ -2215,24 +2217,24 @@ def run_portfolio(
                 equity += _mark_to_market_value(state["side"], state["qty"], last_price.get(symbol, state["entry_px"]))
         return float(equity)
 
-    def _historical_signal(symbol: str, window: pd.DataFrame, bar_row: pd.Series, threshold_value: int) -> dict:
+    def _historical_signal(symbol: str, bar_idx: int, bar_row: pd.Series, threshold_value: int) -> dict:
         filter_context = filter_contexts[symbol]
         event_context = event_contexts[symbol]
         bar_ts = pd.Timestamp(bar_row["t"])
         bar_date = bar_ts.strftime("%Y-%m-%d")
-        mt = spy_trend.get(bar_date, 0)
+        mt = 0 if broker.is_crypto(symbol) else spy_trend.get(bar_date, 0)
         symbol_news = _historical_news_before(event_context, bar_ts, time_key="news_times", news_key="news")
         earnings_news = _historical_news_before(event_context, bar_ts, time_key="earnings_news_times", news_key="earnings_news")
         if not symbol_news:
             symbol_news = list(earnings_news)
         market_news = _historical_news_before(market_event_context, bar_ts, time_key="news_times", news_key="news")
         earnings_soon = events.is_earnings_period_from_news(earnings_news, as_of=bar_row["t"]) if earnings_news else False
-        sig = strategy.compute_signals(
-            window.to_dict("records"),
+        sig = strategy.signal_at_index(
+            bar_idx,
+            symbol_pres[symbol],
             market_trend=mt,
             earnings_soon=earnings_soon,
             threshold=threshold_value,
-            timeframe=timeframe,
         )
         event_result = events.get_historical_event_score(
             symbol,
@@ -2248,9 +2250,11 @@ def run_portfolio(
         sig["sentiment_trend"] = events.sentiment_trend_from_news(symbol_news, as_of=bar_row["t"], max_age_days=7.0)
         sig["macro_event_day"] = bool(filter_context.get("macro_day", {}).get(bar_date))
         sig["peer_consensus"] = True
+        df_sym = symbol_dfs[symbol]
+        prev_window = df_sym.iloc[max(0, bar_idx - 1):bar_idx]
         sig["signal"] = _apply_historical_signal_filters(
             sig.get("signal") or _signal_for_threshold(int(sig.get("score") or 0), threshold_value),
-            window,
+            prev_window,
             bar_row,
             timeframe,
             filter_context=filter_context,
@@ -2260,15 +2264,17 @@ def run_portfolio(
     for ts_value, symbol, idx in event_queue:
         df = symbol_dfs[symbol]
         state = states[symbol]
-        window = df.iloc[:idx]
         bar = df.iloc[idx]
         price = float(bar["c"])
         last_price[symbol] = price
-        close_history[symbol] = window["c"].astype(float).tolist()
+        close_history[symbol].append(price)
 
         ts = ts_value.strftime("%Y-%m-%d %H:%M")
         bar_date = ts[:10]
-        threshold_value = strategy._resolve_signal_threshold(timeframe, None) + (
+        base_threshold = strategy._resolve_signal_threshold(timeframe, None)
+        if broker.is_crypto(symbol):
+            base_threshold = max(2, base_threshold - 2)
+        threshold_value = base_threshold + (
             1 if filter_contexts[symbol].get("macro_day", {}).get(bar_date) else 0
         )
         account = _account_snapshot(cash, _portfolio_equity())
@@ -2307,7 +2313,7 @@ def run_portfolio(
                     and config.USE_AGENT
                     and state["exit_hold_count"] < config.MAX_EXIT_HOLDS
                 ):
-                    review_sig = _historical_signal(symbol, window, bar, threshold_value)
+                    review_sig = _historical_signal(symbol, idx, bar, threshold_value)
                     score = int(review_sig.get("score") or 0)
                     hold_review = (
                         (state["side"] == "long" and score >= threshold_value + 1)
@@ -2367,14 +2373,14 @@ def run_portfolio(
                         }
                     )
                     if "stop" in reason:
-                        state["stop_cooldown"] = 3
+                        state["stop_cooldown"] = config.STOP_COOLDOWN_BARS
                     exited_this_bar = True
 
         if exited_this_bar:
             equity_curve.append({"date": ts, "equity": round(_portfolio_equity(), 2)})
             continue
 
-        sig = _historical_signal(symbol, window, bar, threshold_value)
+        sig = _historical_signal(symbol, idx, bar, threshold_value)
         signal = str(sig.get("signal") or "hold")
 
         if state["side"] == "long" and state["qty"] >= 2 and not state["partial_done"] and state["active_stop_pct"] > 0:

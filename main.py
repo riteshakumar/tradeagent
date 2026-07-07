@@ -744,11 +744,17 @@ def _process_symbol(symbol: str, watchlist: list[str], market_trend: int = 0) ->
     if earnings_soon:
         log.info("%s: earnings period detected - buy suppressed", symbol)
 
+    is_crypto = broker.is_crypto(symbol)
+    effective_trend = 0 if is_crypto else market_trend
+    effective_threshold = (
+        max(2, config.SIGNAL_THRESHOLD - 2) if is_crypto else config.SIGNAL_THRESHOLD
+    )
     sig = strategy.compute_signals(
         bars,
-        market_trend=market_trend,
+        market_trend=effective_trend,
         earnings_soon=earnings_soon,
         timeframe=config.BAR_TIMEFRAME,
+        threshold=effective_threshold,
     )
     sig = _maybe_run_events(symbol, sig)
 

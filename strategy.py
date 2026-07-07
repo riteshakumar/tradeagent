@@ -653,14 +653,15 @@ def compute_signals(
         is_intraday=is_intraday,
     )
     disabled = {str(name).strip().lower() for name in (disabled_components or set()) if str(name).strip()}
-    # Soft agreement: 0.5× multiplier when indicators conflict instead of full zero-wipe.
-    # Strong signals (score≥6) still exceed threshold after halving; weak mixed signals hold.
-    _agree_factor = 1.0 if _check_indicator_agreement(component_scores) else 0.5
+    # Soft agreement: 0.75× multiplier when indicators conflict instead of full zero-wipe.
+    # Strong signals still clear threshold after reduction; weak mixed signals become hold.
+    # 0.75× (was 0.5×): less aggressive — mixed signals are penalised but not killed.
+    _agree_factor = 1.0 if _check_indicator_agreement(component_scores) else 0.75
     if disabled:
         component_scores = {name: score for name, score in component_scores.items() if name not in disabled}
         component_reasons = {name: reason for name, reason in component_reasons.items() if name not in disabled}
         if not _check_indicator_agreement(component_scores):
-            _agree_factor = min(_agree_factor, 0.5)
+            _agree_factor = min(_agree_factor, 0.75)
 
     weights = _BASE_WEIGHTS
     if config.ENABLE_REGIME_SWITCHING:
@@ -679,8 +680,8 @@ def compute_signals(
     # SPY bear-market penalty: raises effective threshold by 1 (soft, not hard block)
     # Hard block was killing dip-buy opportunities; _ema_score already penalises downtrends.
     if market_trend == -1:
-        weighted_score -= 1.0
-        reasons.append("[SPY bear penalty: -1]")
+        weighted_score -= 0.5
+        reasons.append("[SPY bear penalty: -0.5]")
 
     score = int(round(weighted_score))
     t = _resolve_signal_threshold(resolved_timeframe, threshold)
@@ -966,9 +967,9 @@ def signal_at_index(
         elif diff_pct < -0.5:
             _add("vwap", -1, f"price below VWAP by {abs(diff_pct):.1f}%")
 
-    # Soft agreement: 0.5× on weighted_score instead of zeroing all components.
-    # Strong signals still clear threshold after halving; weak mixed signals become hold.
-    _agree_factor = 1.0 if _check_indicator_agreement(component_scores) else 0.5
+    # Soft agreement: 0.75× on weighted_score instead of zeroing all components.
+    # Strong signals still clear threshold after reduction; weak mixed signals become hold.
+    _agree_factor = 1.0 if _check_indicator_agreement(component_scores) else 0.75
 
     # Volume confirm (after agreement check — uses pre-agreement component sum)
     base_score = float(sum(component_scores.values()))
@@ -995,8 +996,8 @@ def signal_at_index(
         reasons.append(f"[agreement penalty: ×{_agree_factor:.1f}]")
 
     if market_trend == -1:
-        weighted_score -= 1.0
-        reasons.append("[SPY bear penalty: -1]")
+        weighted_score -= 0.5
+        reasons.append("[SPY bear penalty: -0.5]")
 
     score = int(round(weighted_score))
     t = _resolve_signal_threshold(timeframe, threshold)
